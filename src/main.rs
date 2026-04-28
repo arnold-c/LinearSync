@@ -522,7 +522,7 @@ fn pull_issues(
             }
         }
 
-        let markdown_content = match template {
+        let rendered_note = match template {
             Some(template) => render_template(
                 template,
                 &TemplateContext {
@@ -553,6 +553,8 @@ fn pull_issues(
             ),
         };
 
+        let markdown_content = rendered_note.content;
+
         let issue_file_path = file_path_for_issue(output_dir, status, identifier);
         let merge_result = if force {
             MergeResult {
@@ -560,7 +562,11 @@ fn pull_issues(
                 warning: None,
             }
         } else {
-            merge_with_existing_note(&issue_file_path, &markdown_content)
+            merge_with_existing_note(
+                &issue_file_path,
+                &markdown_content,
+                &rendered_note.ignored_properties,
+            )
         };
         let markdown_content = merge_result.content;
 
@@ -614,6 +620,11 @@ struct TemplateContext<'a> {
     team_name: &'a str,
 }
 
+struct RenderedNote {
+    content: String,
+    ignored_properties: Vec<String>,
+}
+
 fn load_template(template_path: Option<&Path>) -> Option<String> {
     let path = template_path
         .map(Path::to_path_buf)
@@ -662,7 +673,7 @@ fn installed_template_path() -> Option<&'static PathBuf> {
     INSTALLED_TEMPLATE_PATH.get().and_then(|path| path.as_ref())
 }
 
-fn render_template(template: &str, context: &TemplateContext<'_>) -> String {
+fn render_template(template: &str, context: &TemplateContext<'_>) -> RenderedNote {
     let rendered = template
         .replace("{{title}}", context.title)
         .replace("{{status}}", context.status)
@@ -677,7 +688,12 @@ fn render_template(template: &str, context: &TemplateContext<'_>) -> String {
         .replace("{{last_synced}}", context.now)
         .replace("{{team_name}}", context.team_name);
 
-    ensure_managed_section(&rendered)
+    let ignored_properties = extract_ignored_properties(&rendered);
+
+    RenderedNote {
+        content: ensure_managed_section(&rendered),
+        ignored_properties,
+    }
 }
 
 fn default_markdown_content(
@@ -690,7 +706,7 @@ fn default_markdown_content(
     formatted_description: &str,
     url: &str,
     now: &str,
-) -> String {
+) -> RenderedNote {
     let managed = format!(
         r#"---
 title: "{title}"
@@ -714,7 +730,10 @@ linear_id: "{issue_id}"
 "#
     );
 
-    managed
+    RenderedNote {
+        content: managed,
+        ignored_properties: Vec::new(),
+    }
 }
 
 fn ensure_managed_section(content: &str) -> String {
@@ -755,10 +774,10 @@ mod tests {
             "2026-04-28 12:00:00",
         );
 
-        assert!(content.starts_with("---\n"));
-        assert!(content.contains(MANAGED_SECTION_START));
-        assert!(content.contains(MANAGED_SECTION_END));
-        assert!(content.find(MANAGED_SECTION_START).unwrap() > 0);
+        assert!(content.content.starts_with("---\n"));
+        assert!(content.content.contains(MANAGED_SECTION_START));
+        assert!(content.content.contains(MANAGED_SECTION_END));
+        assert!(content.content.find(MANAGED_SECTION_START).unwrap() > 0);
     }
 
     #[test]
@@ -789,10 +808,10 @@ Body line
             },
         );
 
-        assert!(rendered.starts_with("---\n"));
-        assert!(rendered.contains("title: \"Title\""));
-        assert!(rendered.contains(MANAGED_SECTION_START));
-        assert!(rendered.contains("Body line"));
+        assert!(rendered.content.starts_with("---\n"));
+        assert!(rendered.content.contains("title: \"Title\""));
+        assert!(rendered.content.contains(MANAGED_SECTION_START));
+        assert!(rendered.content.contains("Body line"));
     }
 
     #[test]
@@ -818,7 +837,7 @@ new body
 ## My notes
 "#;
 
-        let merged = merge_with_existing_note(&file_path, new_content);
+        let merged = merge_with_existing_note(&file_path, new_content, &[]);
 
         assert!(merged.content.starts_with("---\n"));
         assert!(merged.content.contains("title: \"Title\""));
@@ -855,7 +874,7 @@ new body
             "<!-- linear-sync:managed:end -->\n",
         );
 
-        let warning = frontmatter_conflict_warning(existing, imported).unwrap();
+        let warning = frontmatter_conflict_warning(existing, imported, &[]).unwrap();
         assert!(warning.diff.contains("~ title: \"Local title\" -> \"Imported title\""));
         assert!(warning.diff.contains("~ project: \"[[General]]\" -> \"[[Imported Project]]\""));
         assert!(warning.diff.contains("- id: \"ACA-122\""));
@@ -881,6 +900,49 @@ new body
         let merged = merge_frontmatter(existing, imported);
         assert!(merged.contains("id: \"ACA-122\""));
         assert!(merged.starts_with("---\n"));
+    }
+
+    #[test]
+    fn ignored_properties_are_excluded_from_diff() {
+        let template = concat!(
+            "---\n",
+            "title: \"{{title}}\"\n",
+            "ignored_properties: alias, id\n",
+            "---\n\n",
+            "Body\n"
+        );
+
+        let rendered = render_template(
+            template,
+            &TemplateContext {
+                title: "Imported title",
+                status: "Todo",
+                issue_id: "id-1",
+                identifier: "ABC-1",
+                url: "https://linear.app/test",
+                project: "Project",
+                description: "Desc",
+                formatted_description: "Desc",
+                labels_yaml: "",
+                gh_yaml: "",
+                now: "2026-04-28 12:00:00",
+                team_name: "Team",
+            },
+        );
+
+        let existing = concat!(
+            "---\n",
+            "title: \"Local title\"\n",
+            "alias: \"Keep me\"\n",
+            "id: \"ACA-122\"\n",
+            "---\n\n",
+            "<!-- linear-sync:managed:start -->\nold\n<!-- linear-sync:managed:end -->\n",
+        );
+
+        let warning = frontmatter_conflict_warning(existing, &rendered.content, &rendered.ignored_properties).unwrap();
+        assert!(warning.diff.contains("~ title: \"Local title\" -> \"Imported title\""));
+        assert!(!warning.diff.contains("alias"));
+        assert!(!warning.diff.contains("id: \"ACA-122\""));
     }
 }
 
@@ -1058,7 +1120,11 @@ struct MergeResult {
     warning: Option<FrontmatterWarning>,
 }
 
-fn merge_with_existing_note(file_path: &Path, new_content: &str) -> MergeResult {
+fn merge_with_existing_note(
+    file_path: &Path,
+    new_content: &str,
+    ignored_properties: &[String],
+) -> MergeResult {
     let existing = match fs::read_to_string(file_path) {
         Ok(content) => content,
         Err(_) => {
@@ -1070,7 +1136,7 @@ fn merge_with_existing_note(file_path: &Path, new_content: &str) -> MergeResult 
     };
 
     let user_content = extract_user_content(&existing);
-    let warning = frontmatter_conflict_warning(&existing, new_content);
+    let warning = frontmatter_conflict_warning(&existing, new_content, ignored_properties);
     let content_with_frontmatter = merge_frontmatter(&existing, new_content);
     let content_with_conflict = insert_or_remove_conflict_section(
         &content_with_frontmatter,
@@ -1125,7 +1191,11 @@ fn insert_or_remove_conflict_section(
     }
 }
 
-fn frontmatter_conflict_warning(existing: &str, new_content: &str) -> Option<FrontmatterWarning> {
+fn frontmatter_conflict_warning(
+    existing: &str,
+    new_content: &str,
+    ignored_properties: &[String],
+) -> Option<FrontmatterWarning> {
     let (existing_frontmatter, _) = split_frontmatter(existing)?;
     let (new_frontmatter, _) = split_frontmatter(new_content)?;
 
@@ -1145,6 +1215,8 @@ fn frontmatter_conflict_warning(existing: &str, new_content: &str) -> Option<Fro
             }
         }
     }
+
+    keys.retain(|key| !ignored_properties.iter().any(|ignored| ignored == key));
 
     let mut diff_lines = Vec::new();
 
@@ -1173,6 +1245,34 @@ fn frontmatter_conflict_warning(existing: &str, new_content: &str) -> Option<Fro
         Some(FrontmatterWarning {
             diff: diff_lines.join("\n"),
         })
+    }
+}
+
+fn extract_ignored_properties(content: &str) -> Vec<String> {
+    let Some((frontmatter, _)) = split_frontmatter(content) else {
+        return Vec::new();
+    };
+    let Some(map) = parse_frontmatter_map(frontmatter) else {
+        return Vec::new();
+    };
+
+    let ignored = map.get(YamlValue::String("ignored_properties".to_string()));
+    match ignored {
+        Some(YamlValue::String(value)) => value
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .collect(),
+        Some(YamlValue::Sequence(values)) => values
+            .iter()
+            .filter_map(|value| match value {
+                YamlValue::String(value) => Some(value.trim().to_string()),
+                _ => None,
+            })
+            .filter(|value| !value.is_empty())
+            .collect(),
+        _ => Vec::new(),
     }
 }
 

@@ -3,6 +3,7 @@ title: "{{title}}"
 status: "{{status}}"
 priority: 0
 linear_id: "[{{linear_id}}]({{url}})"
+ignored_properties: aliases, id
 {{labels_yaml}}{{github_links_yaml}}project: "[[{{project}}]]"
 ---
 
