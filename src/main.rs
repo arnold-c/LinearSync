@@ -18,6 +18,7 @@ const CONFLICT_SECTION_END: &str = "<!-- linear-sync:frontmatter-conflict:end --
 const ANSI_RED: &str = "\x1b[31m";
 const ANSI_GREEN: &str = "\x1b[32m";
 const ANSI_YELLOW: &str = "\x1b[33m";
+const ANSI_BLUE: &str = "\x1b[34m";
 const ANSI_RESET: &str = "\x1b[0m";
 
 const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
@@ -62,6 +63,9 @@ enum Commands {
         /// Overwrite the entire note instead of only updating the managed section.
         #[arg(long)]
         force: bool,
+        /// Use YAML-style diff output instead of delta rendering.
+        #[arg(long)]
+        no_delta: bool,
     },
     /// Pushes local status updates back to Linear
     Push {
@@ -108,6 +112,7 @@ fn main() {
             merge_all_teams,
             confirm,
             force,
+            no_delta,
         } => {
             pull_command(
                 &client,
@@ -118,6 +123,7 @@ fn main() {
                 *merge_all_teams,
                 *confirm,
                 *force,
+                !*no_delta,
             );
         }
         Commands::Push { input_dir } => {
@@ -135,6 +141,7 @@ fn pull_command(
     merge_all_teams: bool,
     confirm: bool,
     force: bool,
+    use_delta: bool,
 ) {
     let teams = fetch_teams(client, api_key);
 
@@ -160,7 +167,11 @@ fn pull_command(
                 &output_dir,
                 template.as_deref(),
                 force,
+                use_delta,
             );
+            if use_delta && !stats.delta_output.is_empty() {
+                print_delta_output(&stats.delta_output);
+            }
             println!(
                 "Imported {} notes ({} warnings).",
                 stats.imported, stats.warnings
@@ -184,9 +195,14 @@ fn pull_command(
                     &team_output_dir,
                     template.as_deref(),
                     force,
+                    use_delta,
                 );
                 total.imported += stats.imported;
                 total.warnings += stats.warnings;
+                total.delta_output.push_str(&stats.delta_output);
+            }
+            if use_delta && !total.delta_output.is_empty() {
+                print_delta_output(&total.delta_output);
             }
             println!(
                 "Imported {} notes ({} warnings).",
@@ -393,6 +409,7 @@ fn fetch_teams(client: &Client, api_key: &str) -> Vec<TeamInfo> {
 struct PullStats {
     imported: usize,
     warnings: usize,
+    delta_output: String,
 }
 
 fn pull_issues(
@@ -402,6 +419,7 @@ fn pull_issues(
     output_dir: &PathBuf,
     template: Option<&str>,
     force: bool,
+    use_delta: bool,
 ) -> PullStats {
     let query = r#"
     query GetTeamIssues($teamId: String!) {
@@ -569,18 +587,10 @@ fn pull_issues(
                     yellow = ANSI_YELLOW,
                     reset = ANSI_RESET,
                 );
-                for line in warning.diff.lines() {
-                    if let Some(rest) = line.strip_prefix("- ") {
-                        println!("  {red}- {rest}{reset}", red = ANSI_RED, reset = ANSI_RESET);
-                    } else if let Some(rest) = line.strip_prefix("+ ") {
-                        println!(
-                            "  {green}+ {rest}{reset}",
-                            green = ANSI_GREEN,
-                            reset = ANSI_RESET
-                        );
-                    } else {
-                        println!("  {line}");
-                    }
+                if use_delta {
+                    stats.delta_output.push_str(&format_delta_patch(identifier, &team.name, &file_path, &warning.diff));
+                } else {
+                    print_colored_diff(&warning.diff);
                 }
             }
         }
@@ -845,10 +855,8 @@ new body
         );
 
         let warning = frontmatter_conflict_warning(existing, imported).unwrap();
-        assert!(warning.diff.contains("- title: \"Local title\""));
-        assert!(warning.diff.contains("+ title: \"Imported title\""));
-        assert!(warning.diff.contains("- project: \"[[General]]\""));
-        assert!(warning.diff.contains("+ project: \"[[Imported Project]]\""));
+        assert!(warning.diff.contains("~ title: \"Local title\" -> \"Imported title\""));
+        assert!(warning.diff.contains("~ project: \"[[General]]\" -> \"[[Imported Project]]\""));
     }
 }
 
@@ -911,6 +919,114 @@ fn extract_user_content(content: &str) -> Option<String> {
 
 struct FrontmatterWarning {
     diff: String,
+}
+
+fn print_colored_diff(diff: &str) {
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("- ") {
+            println!("  {red}- {rest}{reset}", red = ANSI_RED, reset = ANSI_RESET);
+        } else if let Some(rest) = line.strip_prefix("+ ") {
+            println!("  {green}+ {rest}{reset}", green = ANSI_GREEN, reset = ANSI_RESET);
+        } else if let Some(rest) = line.strip_prefix("~ ") {
+            println!("  {blue}~ {rest}{reset}", blue = ANSI_BLUE, reset = ANSI_RESET);
+        } else {
+            println!("  {line}");
+        }
+    }
+}
+
+fn format_delta_patch(identifier: &str, team_name: &str, file_path: &Path, diff: &str) -> String {
+    let body = diff
+        .lines()
+        .map(|line| {
+            if let Some(rest) = line.strip_prefix("- ") {
+                format!("-{rest}")
+            } else if let Some(rest) = line.strip_prefix("+ ") {
+                format!("+{rest}")
+            } else if let Some(rest) = line.strip_prefix("~ ") {
+                format!(" {rest}")
+            } else {
+                format!(" {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ {identifier} ({team_name}) @@\n{body}\n\n",
+        path = file_path.display(),
+    )
+}
+
+fn print_delta_output(delta_output: &str) {
+    if print_diff_with_delta(delta_output).is_none() {
+        print_yaml_style_diff_from_delta_output(delta_output);
+    }
+}
+
+fn print_yaml_style_diff_from_delta_output(delta_output: &str) {
+    let mut current_header: Option<String> = None;
+    let mut current_diff_lines = Vec::new();
+
+    for line in delta_output.lines() {
+        if let Some(header) = parse_delta_patch_header(line) {
+            if let Some(previous_header) = current_header.replace(header) {
+                println!("{previous_header}");
+                print_colored_diff(&current_diff_lines.join("\n"));
+                current_diff_lines.clear();
+            }
+            continue;
+        }
+
+        if line.starts_with("diff --git ")
+            || line.starts_with("--- ")
+            || line.starts_with("+++ ")
+            || line.trim().is_empty()
+        {
+            continue;
+        }
+
+        current_diff_lines.push(normalize_delta_fallback_line(line));
+    }
+
+    if let Some(header) = current_header {
+        println!("{header}");
+        print_colored_diff(&current_diff_lines.join("\n"));
+    }
+}
+
+fn parse_delta_patch_header(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("@@ ")?;
+    let header = rest.strip_suffix(" @@")?;
+    Some(header.to_string())
+}
+
+fn normalize_delta_fallback_line(line: &str) -> String {
+    if let Some(rest) = line.strip_prefix('-') {
+        format!("- {}", rest)
+    } else if let Some(rest) = line.strip_prefix('+') {
+        format!("+ {}", rest)
+    } else {
+        line.trim_start().to_string()
+    }
+}
+
+fn print_diff_with_delta(diff: &str) -> Option<()> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("delta")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .spawn()
+        .ok()?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(diff.as_bytes()).ok()?;
+    }
+
+    let status = child.wait().ok()?;
+    if status.success() { Some(()) } else { None }
 }
 
 struct MergeResult {
@@ -989,11 +1105,11 @@ fn frontmatter_conflict_warning(existing: &str, new_content: &str) -> Option<Fro
             continue;
         }
 
-        if let Some(value) = existing_value {
-            diff_lines.extend(render_yaml_value_diff('-', key, value));
-        }
-        if let Some(value) = new_value {
-            diff_lines.extend(render_yaml_value_diff('+', key, value));
+        match (existing_value, new_value) {
+            (Some(old), Some(new)) => diff_lines.extend(render_modified_yaml_value_diff(key, old, new)),
+            (Some(old), None) => diff_lines.extend(render_yaml_value_diff('-', key, old)),
+            (None, Some(new)) => diff_lines.extend(render_yaml_value_diff('+', key, new)),
+            (None, None) => {}
         }
     }
 
@@ -1026,6 +1142,40 @@ fn render_yaml_value_diff(prefix: char, key: &str, value: &YamlValue) -> Vec<Str
             lines
         }
         _ => vec![format!("{prefix} {key}: {}", yaml_scalar_for_diff(value))],
+    }
+}
+
+fn render_modified_yaml_value_diff(key: &str, old: &YamlValue, new: &YamlValue) -> Vec<String> {
+    match (old, new) {
+        (YamlValue::Sequence(old_seq), YamlValue::Sequence(new_seq)) => {
+            let old_items = old_seq.iter().map(yaml_scalar_for_diff).collect::<Vec<_>>();
+            let new_items = new_seq.iter().map(yaml_scalar_for_diff).collect::<Vec<_>>();
+
+            let removed = old_items
+                .iter()
+                .filter(|item| !new_items.contains(item))
+                .cloned()
+                .collect::<Vec<_>>();
+            let added = new_items
+                .iter()
+                .filter(|item| !old_items.contains(item))
+                .cloned()
+                .collect::<Vec<_>>();
+
+            let mut lines = vec![format!("~ {key}:")];
+            for item in removed {
+                lines.push(format!("-   - {item}"));
+            }
+            for item in added {
+                lines.push(format!("+   - {item}"));
+            }
+            lines
+        }
+        _ => vec![format!(
+            "~ {key}: {} -> {}",
+            yaml_scalar_for_diff(old),
+            yaml_scalar_for_diff(new)
+        )],
     }
 }
 
