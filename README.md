@@ -86,6 +86,7 @@ Fetches active issues from Linear and writes them to Markdown files.
 - `-t, --team-id <TEAM_ID>`: Pull issues for a specific team
     - You should use the team identifier used in issue-titles e.g., `ACA` for `ACA-001`
 - `-o, --output-dir <PATH>`: Output directory for generated Markdown files
+- `--template <PATH>`: Use a specific Markdown template file for created notes
 - `-m, --merge-all-teams`: Merge issues from all teams into a single directory
 - `-c, --confirm`: Interactively confirm team selection, merge behavior, and output path
 
@@ -119,6 +120,12 @@ Write output to a custom directory:
 
 ```bash
 cargo run -- pull --output-dir /path/to/obsidian/linear
+```
+
+Use a specific template file:
+
+```bash
+cargo run -- pull --template ./template.md
 ```
 
 ### `push`
@@ -168,6 +175,43 @@ Team names are slugified to lowercase and non-alphanumeric characters are replac
 ## Markdown Format
 
 Each issue is exported as a Markdown file with YAML frontmatter and a description block.
+
+### Templates
+
+`pull` resolves templates in this order:
+
+1. the path passed via `--template`
+2. `./template.md` in your current working directory
+3. `template.md` next to the installed binary
+
+This repository includes a default `template.md` at the project root.
+If you run from the repo, it will be picked up automatically.
+
+If you install with `cargo install --path .`, Cargo installs the binary but does
+not automatically copy `template.md` alongside it. That means the installed-binary
+fallback only works if you manually place a `template.md` next to the binary.
+On most systems that binary is in `~/.cargo/bin/`, so the fallback path would
+typically be:
+
+```text
+~/.cargo/bin/template.md
+```
+
+Supported placeholders:
+
+- `{{title}}`
+- `{{status}}`
+- `{{linear_id}}`
+- `{{identifier}}`
+- `{{url}}`
+- `{{project}}`
+- `{{description}}`
+- `{{formatted_description}}`
+    - This is an internally-created variable that re-wraps line breaks in the description to ensure it fits within a callout
+- `{{labels_yaml}}`
+- `{{github_links_yaml}}`
+- `{{last_synced}}`
+- `{{team_name}}`
 
 Example:
 

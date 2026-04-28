@@ -6,12 +6,16 @@ use serde_json::{Value, json};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::OnceLock;
 
 const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
 const DEFAULT_OUTPUT_ROOT: &str = "linear-issues";
+const DEFAULT_TEMPLATE_PATH: &str = "template.md";
 const ALL_TEAMS_OPTION: &str = "ALL TEAMS";
+
+static INSTALLED_TEMPLATE_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 #[derive(Parser)]
 #[command(
@@ -36,6 +40,9 @@ enum Commands {
         /// or linear-issues/all-teams when merging all teams.
         #[arg(short, long)]
         output_dir: Option<PathBuf>,
+        /// Path to a Markdown template file used to structure created notes.
+        #[arg(short, long)]
+        template: Option<PathBuf>,
         /// Merge issues from all teams into a single subdirectory.
         #[arg(short = 'm', long)]
         merge_all_teams: bool,
@@ -59,6 +66,7 @@ struct TeamInfo {
 
 fn main() {
     dotenv().ok();
+    initialize_installed_template_path();
 
     let cli = Cli::parse();
 
@@ -83,6 +91,7 @@ fn main() {
         Commands::Pull {
             team_id,
             output_dir,
+            template,
             merge_all_teams,
             confirm,
         } => {
@@ -91,6 +100,7 @@ fn main() {
                 &api_key,
                 team_id.clone(),
                 output_dir.clone(),
+                template.clone(),
                 *merge_all_teams,
                 *confirm,
             );
@@ -106,6 +116,7 @@ fn pull_command(
     api_key: &str,
     team_id: Option<String>,
     output_dir: Option<PathBuf>,
+    template_path: Option<PathBuf>,
     merge_all_teams: bool,
     confirm: bool,
 ) {
@@ -122,9 +133,11 @@ fn pull_command(
         resolve_pull_selection(&teams, team_id, output_dir, merge_all_teams)
     };
 
+    let template = load_template(template_path.as_deref());
+
     match selection {
         PullSelection::SingleTeam { team, output_dir } => {
-            pull_issues(client, api_key, &team, &output_dir);
+            pull_issues(client, api_key, &team, &output_dir, template.as_deref());
         }
         PullSelection::AllTeams {
             root_output_dir,
@@ -136,7 +149,13 @@ fn pull_command(
                 } else {
                     root_output_dir.join(slugify_team_name(&team.name))
                 };
-                pull_issues(client, api_key, &team, &team_output_dir);
+                pull_issues(
+                    client,
+                    api_key,
+                    &team,
+                    &team_output_dir,
+                    template.as_deref(),
+                );
             }
         }
     }
@@ -335,7 +354,13 @@ fn fetch_teams(client: &Client, api_key: &str) -> Vec<TeamInfo> {
         .collect()
 }
 
-fn pull_issues(client: &Client, api_key: &str, team: &TeamInfo, output_dir: &PathBuf) {
+fn pull_issues(
+    client: &Client,
+    api_key: &str,
+    team: &TeamInfo,
+    output_dir: &PathBuf,
+    template: Option<&str>,
+) {
     let query = r#"
     query GetTeamIssues($teamId: String!) {
       team(id: $teamId) {
@@ -436,25 +461,36 @@ fn pull_issues(client: &Client, api_key: &str, team: &TeamInfo, output_dir: &Pat
             }
         }
 
-        let markdown_content = format!(
-            r#"---
-title: "{title}"
-status: "{status}"
-priority: 0
-linear_id: "{issue_id}"
-{labels_yaml}{gh_yaml}
-project: "[[{project}]]"
----
-
->[!info] Description
-> {formatted_description}
-
-[Open in Linear]({url})
-
----
-*Last synced: {now}*
-"#
-        );
+        let markdown_content = match template {
+            Some(template) => render_template(
+                template,
+                &TemplateContext {
+                    title,
+                    status,
+                    issue_id,
+                    identifier,
+                    url,
+                    project,
+                    description,
+                    formatted_description: &formatted_description,
+                    labels_yaml: &labels_yaml,
+                    gh_yaml: &gh_yaml,
+                    now: &now,
+                    team_name: &team.name,
+                },
+            ),
+            None => default_markdown_content(
+                title,
+                status,
+                issue_id,
+                &labels_yaml,
+                &gh_yaml,
+                project,
+                &formatted_description,
+                url,
+                &now,
+            ),
+        };
 
         let safe_status = status.to_lowercase().replace(' ', "-");
         let status_dir = output_dir.join(&safe_status);
@@ -476,6 +512,117 @@ project: "[[{project}]]"
             );
         }
     }
+}
+
+struct TemplateContext<'a> {
+    title: &'a str,
+    status: &'a str,
+    issue_id: &'a str,
+    identifier: &'a str,
+    url: &'a str,
+    project: &'a str,
+    description: &'a str,
+    formatted_description: &'a str,
+    labels_yaml: &'a str,
+    gh_yaml: &'a str,
+    now: &'a str,
+    team_name: &'a str,
+}
+
+fn load_template(template_path: Option<&Path>) -> Option<String> {
+    let path = template_path
+        .map(Path::to_path_buf)
+        .or_else(default_template_path_if_present);
+
+    path.map(|path| {
+        fs::read_to_string(&path).unwrap_or_else(|error| {
+            eprintln!(
+                "❌ Error: Failed to read template file '{}': {}",
+                path.display(),
+                error
+            );
+            process::exit(1);
+        })
+    })
+}
+
+fn default_template_path_if_present() -> Option<PathBuf> {
+    default_template_search_paths()
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
+fn default_template_search_paths() -> Vec<PathBuf> {
+    let mut paths = vec![PathBuf::from(DEFAULT_TEMPLATE_PATH)];
+
+    if let Some(installed_path) = installed_template_path() {
+        paths.push(installed_path.clone());
+    }
+
+    paths
+}
+
+fn initialize_installed_template_path() {
+    let _ = INSTALLED_TEMPLATE_PATH.get_or_init(|| {
+        env::current_exe().ok().map(|exe_path| {
+            exe_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(DEFAULT_TEMPLATE_PATH)
+        })
+    });
+}
+
+fn installed_template_path() -> Option<&'static PathBuf> {
+    INSTALLED_TEMPLATE_PATH.get().and_then(|path| path.as_ref())
+}
+
+fn render_template(template: &str, context: &TemplateContext<'_>) -> String {
+    template
+        .replace("{{title}}", context.title)
+        .replace("{{status}}", context.status)
+        .replace("{{linear_id}}", context.issue_id)
+        .replace("{{identifier}}", context.identifier)
+        .replace("{{url}}", context.url)
+        .replace("{{project}}", context.project)
+        .replace("{{description}}", context.description)
+        .replace("{{formatted_description}}", context.formatted_description)
+        .replace("{{labels_yaml}}", context.labels_yaml)
+        .replace("{{github_links_yaml}}", context.gh_yaml)
+        .replace("{{last_synced}}", context.now)
+        .replace("{{team_name}}", context.team_name)
+}
+
+fn default_markdown_content(
+    title: &str,
+    status: &str,
+    issue_id: &str,
+    labels_yaml: &str,
+    gh_yaml: &str,
+    project: &str,
+    formatted_description: &str,
+    url: &str,
+    now: &str,
+) -> String {
+    format!(
+        r#"---
+title: "{title}"
+status: "{status}"
+priority: 0
+linear_id: "{issue_id}"
+{labels_yaml}{gh_yaml}
+project: "[[{project}]]"
+---
+
+>[!info] Description
+> {formatted_description}
+
+[Open in Linear]({url})
+
+---
+*Last synced: {now}*
+"#
+    )
 }
 
 fn graphql_request(client: &Client, api_key: &str, query: &str, variables: Value) -> Value {
