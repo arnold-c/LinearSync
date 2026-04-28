@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use dotenvy::dotenv;
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
+use serde_yaml::Value as YamlValue;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -12,6 +13,12 @@ use std::sync::OnceLock;
 
 const MANAGED_SECTION_START: &str = "<!-- linear-sync:managed:start -->";
 const MANAGED_SECTION_END: &str = "<!-- linear-sync:managed:end -->";
+const CONFLICT_SECTION_START: &str = "<!-- linear-sync:frontmatter-conflict:start -->";
+const CONFLICT_SECTION_END: &str = "<!-- linear-sync:frontmatter-conflict:end -->";
+const ANSI_RED: &str = "\x1b[31m";
+const ANSI_GREEN: &str = "\x1b[32m";
+const ANSI_YELLOW: &str = "\x1b[33m";
+const ANSI_RESET: &str = "\x1b[0m";
 
 const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
 const DEFAULT_OUTPUT_ROOT: &str = "linear-issues";
@@ -146,7 +153,7 @@ fn pull_command(
 
     match selection {
         PullSelection::SingleTeam { team, output_dir } => {
-            pull_issues(
+            let stats = pull_issues(
                 client,
                 api_key,
                 &team,
@@ -154,18 +161,23 @@ fn pull_command(
                 template.as_deref(),
                 force,
             );
+            println!(
+                "Imported {} notes ({} warnings).",
+                stats.imported, stats.warnings
+            );
         }
         PullSelection::AllTeams {
             root_output_dir,
             merge_all_teams,
         } => {
+            let mut total = PullStats::default();
             for team in teams {
                 let team_output_dir = if merge_all_teams {
                     root_output_dir.clone()
                 } else {
                     root_output_dir.join(slugify_team_name(&team.name))
                 };
-                pull_issues(
+                let stats = pull_issues(
                     client,
                     api_key,
                     &team,
@@ -173,7 +185,13 @@ fn pull_command(
                     template.as_deref(),
                     force,
                 );
+                total.imported += stats.imported;
+                total.warnings += stats.warnings;
             }
+            println!(
+                "Imported {} notes ({} warnings).",
+                total.imported, total.warnings
+            );
         }
     }
 }
@@ -371,6 +389,12 @@ fn fetch_teams(client: &Client, api_key: &str) -> Vec<TeamInfo> {
         .collect()
 }
 
+#[derive(Default)]
+struct PullStats {
+    imported: usize,
+    warnings: usize,
+}
+
 fn pull_issues(
     client: &Client,
     api_key: &str,
@@ -378,7 +402,7 @@ fn pull_issues(
     output_dir: &PathBuf,
     template: Option<&str>,
     force: bool,
-) {
+) -> PullStats {
     let query = r#"
     query GetTeamIssues($teamId: String!) {
       team(id: $teamId) {
@@ -430,6 +454,7 @@ fn pull_issues(
     }
 
     let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let mut stats = PullStats::default();
 
     for issue in issues {
         let identifier = issue["identifier"].as_str().unwrap_or("UNKNOWN");
@@ -510,14 +535,16 @@ fn pull_issues(
             ),
         };
 
-        let markdown_content = if force {
-            markdown_content
+        let issue_file_path = file_path_for_issue(output_dir, status, identifier);
+        let merge_result = if force {
+            MergeResult {
+                content: markdown_content,
+                warning: None,
+            }
         } else {
-            merge_with_existing_note(
-                &file_path_for_issue(output_dir, status, identifier),
-                &markdown_content,
-            )
+            merge_with_existing_note(&issue_file_path, &markdown_content)
         };
+        let markdown_content = merge_result.content;
 
         let safe_status = status.to_lowercase().replace(' ', "-");
         let status_dir = output_dir.join(&safe_status);
@@ -531,14 +558,35 @@ fn pull_issues(
         if let Err(e) = fs::write(&file_path, &markdown_content) {
             eprintln!("⚠️ Failed to write file {}.md: {}", identifier, e);
         } else {
-            println!(
-                "✅ Successfully synced: {} ({}) to {}",
-                identifier,
-                team.name,
-                output_dir.display()
-            );
+            stats.imported += 1;
+            if let Some(warning) = merge_result.warning {
+                stats.warnings += 1;
+                println!(
+                    "{yellow}⚠ Frontmatter conflict:{reset} {} ({}) -> {}",
+                    identifier,
+                    team.name,
+                    file_path.display(),
+                    yellow = ANSI_YELLOW,
+                    reset = ANSI_RESET,
+                );
+                for line in warning.diff.lines() {
+                    if let Some(rest) = line.strip_prefix("- ") {
+                        println!("  {red}- {rest}{reset}", red = ANSI_RED, reset = ANSI_RESET);
+                    } else if let Some(rest) = line.strip_prefix("+ ") {
+                        println!(
+                            "  {green}+ {rest}{reset}",
+                            green = ANSI_GREEN,
+                            reset = ANSI_RESET
+                        );
+                    } else {
+                        println!("  {line}");
+                    }
+                }
+            }
         }
     }
+
+    stats
 }
 
 struct TemplateContext<'a> {
@@ -639,8 +687,7 @@ title: "{title}"
 status: "{status}"
 priority: 0
 linear_id: "{issue_id}"
-{labels_yaml}{gh_yaml}
-project: "[[{project}]]"
+{labels_yaml}{gh_yaml}project: "[[{project}]]"
 ---
 
 {MANAGED_SECTION_START}
@@ -667,9 +714,7 @@ fn ensure_managed_section(content: &str) -> String {
 
     if let Some((frontmatter, body)) = split_frontmatter(content) {
         let body = body.trim_start_matches('\n');
-        return format!(
-            "{frontmatter}\n{MANAGED_SECTION_START}\n{body}\n{MANAGED_SECTION_END}\n"
-        );
+        return format!("{frontmatter}\n{MANAGED_SECTION_START}\n{body}\n{MANAGED_SECTION_END}\n");
     }
 
     format!("{MANAGED_SECTION_START}\n{content}\n{MANAGED_SECTION_END}\n")
@@ -747,9 +792,7 @@ Body line
 
         fs::write(
             &file_path,
-            format!(
-                "{MANAGED_SECTION_START}\nold body\n{MANAGED_SECTION_END}\n\nMy notes\n"
-            ),
+            format!("{MANAGED_SECTION_START}\nold body\n{MANAGED_SECTION_END}\n\nMy notes\n"),
         )
         .unwrap();
 
@@ -767,24 +810,84 @@ new body
 
         let merged = merge_with_existing_note(&file_path, new_content);
 
-        assert!(merged.starts_with("---\n"));
-        assert!(merged.contains("title: \"Title\""));
-        assert!(merged.contains("new body"));
-        assert!(merged.contains("My notes"));
+        assert!(merged.content.starts_with("---\n"));
+        assert!(merged.content.contains("title: \"Title\""));
+        assert!(merged.content.contains("new body"));
+        assert!(merged.content.contains("My notes"));
+    }
+
+    #[test]
+    fn frontmatter_conflict_creates_warning() {
+        let existing = concat!(
+            "---\n",
+            "title: \"Local title\"\n",
+            "status: \"Todo\"\n",
+            "tags:\n",
+            "  - local-tag\n",
+            "project: \"[[General]]\"\n",
+            "---\n\n",
+            "<!-- linear-sync:managed:start -->\n",
+            "old\n",
+            "<!-- linear-sync:managed:end -->\n",
+        );
+
+        let imported = concat!(
+            "---\n",
+            "title: \"Imported title\"\n",
+            "status: \"Todo\"\n",
+            "tags:\n",
+            "  - missing-tag\n",
+            "project: \"[[Imported Project]]\"\n",
+            "---\n\n",
+            "<!-- linear-sync:managed:start -->\n",
+            "new\n",
+            "<!-- linear-sync:managed:end -->\n",
+        );
+
+        let warning = frontmatter_conflict_warning(existing, imported).unwrap();
+        assert!(warning.diff.contains("- title: \"Local title\""));
+        assert!(warning.diff.contains("+ title: \"Imported title\""));
+        assert!(warning.diff.contains("- project: \"[[General]]\""));
+        assert!(warning.diff.contains("+ project: \"[[Imported Project]]\""));
     }
 }
 
 fn extract_managed_section(content: &str) -> Option<&str> {
-    let start = content.find(MANAGED_SECTION_START)?;
-    let after_start = start + MANAGED_SECTION_START.len();
-    let end_relative = content[after_start..].find(MANAGED_SECTION_END)?;
-    let end = after_start + end_relative + MANAGED_SECTION_END.len();
+    extract_section(content, MANAGED_SECTION_START, MANAGED_SECTION_END)
+}
+
+fn extract_section<'a>(content: &'a str, start_marker: &str, end_marker: &str) -> Option<&'a str> {
+    let start = content.find(start_marker)?;
+    let after_start = start + start_marker.len();
+    let end_relative = content[after_start..].find(end_marker)?;
+    let end = after_start + end_relative + end_marker.len();
     Some(&content[start..end])
 }
 
+fn remove_section(content: &str, start_marker: &str, end_marker: &str) -> String {
+    match extract_section(content, start_marker, end_marker) {
+        Some(section) => {
+            let prefix = content
+                .split_once(section)
+                .map(|(before, _)| before)
+                .unwrap_or("");
+            let suffix = content
+                .rsplit_once(section)
+                .map(|(_, after)| after)
+                .unwrap_or("");
+            format!("{prefix}{suffix}")
+        }
+        None => content.to_string(),
+    }
+}
+
 fn extract_user_content(content: &str) -> Option<String> {
-    let managed = extract_managed_section(content)?;
-    let prefix = content.split_once(managed).map(|(before, _)| before).unwrap_or("");
+    let content = remove_section(content, CONFLICT_SECTION_START, CONFLICT_SECTION_END);
+    let managed = extract_managed_section(&content)?;
+    let prefix = content
+        .split_once(managed)
+        .map(|(before, _)| before)
+        .unwrap_or("");
     let suffix = content
         .rsplit_once(managed)
         .map(|(_, after)| after)
@@ -806,20 +909,134 @@ fn extract_user_content(content: &str) -> Option<String> {
     }
 }
 
-fn merge_with_existing_note(file_path: &Path, new_content: &str) -> String {
+struct FrontmatterWarning {
+    diff: String,
+}
+
+struct MergeResult {
+    content: String,
+    warning: Option<FrontmatterWarning>,
+}
+
+fn merge_with_existing_note(file_path: &Path, new_content: &str) -> MergeResult {
     let existing = match fs::read_to_string(file_path) {
         Ok(content) => content,
-        Err(_) => return new_content.to_string(),
+        Err(_) => {
+            return MergeResult {
+                content: new_content.to_string(),
+                warning: None,
+            };
+        }
     };
 
     let user_content = extract_user_content(&existing);
+    let warning = frontmatter_conflict_warning(&existing, new_content);
+    let content_with_conflict = insert_or_remove_conflict_section(new_content, warning.as_ref());
 
-    if user_content.is_none() {
-        return new_content.to_string();
+    let content = if let Some(user_content) = user_content {
+        let trimmed_new = content_with_conflict.trim_end();
+        format!("{trimmed_new}\n\n{user_content}")
+    } else {
+        content_with_conflict
+    };
+
+    MergeResult { content, warning }
+}
+
+fn insert_or_remove_conflict_section(
+    new_content: &str,
+    warning: Option<&FrontmatterWarning>,
+) -> String {
+    let without_existing = remove_section(new_content, CONFLICT_SECTION_START, CONFLICT_SECTION_END);
+
+    let Some(warning) = warning else {
+        return without_existing;
+    };
+
+    let conflict_block = format!(
+        "{CONFLICT_SECTION_START}\n> [!warning] Linear metadata conflict\n> The imported Linear metadata differs from this note's frontmatter.\n> Review the differences below and reconcile manually, or run `pull --force`.\n>\n> ```diff\n{}\n> ```\n{CONFLICT_SECTION_END}\n",
+        warning
+            .diff
+            .lines()
+            .map(|line| format!("> {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    if let Some((frontmatter, body)) = split_frontmatter(&without_existing) {
+        format!("{frontmatter}\n\n{conflict_block}\n{}", body.trim_start_matches('\n'))
+    } else {
+        format!("{conflict_block}\n{without_existing}")
+    }
+}
+
+fn frontmatter_conflict_warning(existing: &str, new_content: &str) -> Option<FrontmatterWarning> {
+    let (existing_frontmatter, _) = split_frontmatter(existing)?;
+    let (new_frontmatter, _) = split_frontmatter(new_content)?;
+
+    let existing_yaml = parse_frontmatter_map(existing_frontmatter)?;
+    let new_yaml = parse_frontmatter_map(new_frontmatter)?;
+
+    let managed_keys = ["title", "status", "linear_id", "tags", "github_links", "project"];
+    let mut diff_lines = Vec::new();
+
+    for key in managed_keys {
+        let key_value = YamlValue::String(key.to_string());
+        let existing_value = existing_yaml.get(&key_value);
+        let new_value = new_yaml.get(&key_value);
+
+        if existing_value == new_value {
+            continue;
+        }
+
+        if let Some(value) = existing_value {
+            diff_lines.extend(render_yaml_value_diff('-', key, value));
+        }
+        if let Some(value) = new_value {
+            diff_lines.extend(render_yaml_value_diff('+', key, value));
+        }
     }
 
-    let trimmed_new = new_content.trim_end();
-    format!("{trimmed_new}\n\n{}", user_content.unwrap())
+    if diff_lines.is_empty() {
+        None
+    } else {
+        Some(FrontmatterWarning {
+            diff: diff_lines.join("\n"),
+        })
+    }
+}
+
+fn parse_frontmatter_map(frontmatter: &str) -> Option<serde_yaml::Mapping> {
+    let body = frontmatter.strip_prefix("---\n")?;
+    let body = body
+        .strip_suffix("---\n")
+        .or_else(|| body.strip_suffix("\n---"))
+        .or_else(|| body.strip_suffix("---"))?;
+    let yaml = serde_yaml::from_str::<YamlValue>(body.trim()).ok()?;
+    yaml.as_mapping().cloned()
+}
+
+fn render_yaml_value_diff(prefix: char, key: &str, value: &YamlValue) -> Vec<String> {
+    match value {
+        YamlValue::Sequence(sequence) => {
+            let mut lines = vec![format!("{prefix} {key}:")];
+            for item in sequence {
+                lines.push(format!("{prefix}   - {}", yaml_scalar_for_diff(item)));
+            }
+            lines
+        }
+        _ => vec![format!("{prefix} {key}: {}", yaml_scalar_for_diff(value))],
+    }
+}
+
+fn yaml_scalar_for_diff(value: &YamlValue) -> String {
+    match value {
+        YamlValue::String(text) => format!("\"{}\"", text),
+        _ => serde_yaml::to_string(value)
+            .unwrap_or_else(|_| "<unrenderable>".to_string())
+            .trim()
+            .to_string(),
+    }
 }
 
 fn file_path_for_issue(output_dir: &Path, status: &str, identifier: &str) -> PathBuf {
