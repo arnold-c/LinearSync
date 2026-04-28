@@ -214,9 +214,8 @@ Supported placeholders:
 - `{{identifier}}`
 - `{{url}}`
 - `{{project}}`
-- `{{description}}`
-- `{{formatted_description}}`
-    - This is an internally-created variable that re-wraps line breaks in the description to ensure it fits within a callout
+- `{{description_section}}`
+    - Renders the complete Description callout when a Linear issue has a description, otherwise renders nothing
 - `{{labels_yaml}}`
 - `{{github_links_yaml}}`
 - `{{last_synced}}`
@@ -225,33 +224,28 @@ Supported placeholders:
 Example:
 
 ```md
-<!-- linear-sync:managed:start -->
 ---
-title: "Fix login redirect"
-status: "In Progress"
+title: "{{title}}"
+status: "{{status}}"
 priority: 0
-linear_id: "<linear-issue-id>"
-tags:
-  - bug
-  - backend
-github_links:
-  - "https://github.com/org/repo/pull/123"
-project: "[[Authentication]]"
+linear_id: "[{{linear_id}}]({{url}})"
+ignored_properties: aliases, id
+{{labels_yaml}}{{github_links_yaml}}project: "[[{{project}}]]"
 ---
 
->[!info] Description
-> Investigate and fix the redirect loop after login.
-
-[Open in Linear](https://linear.app/...)
+<!-- linear-sync:managed:start -->
+{{description_section}}[Open in Linear]({{url}})
 
 ---
-*Last synced: 2026-04-28 12:00:00*
-<!-- linear-sync:managed:end -->
+*Last synced: {{last_synced}}*
 
 ## My notes
+<!-- linear-sync:managed:end -->
+```
+
+When an issue has no description, `{{description_section}}` renders as an empty string and the note omits the Description callout.
 
 Anything outside the managed section is preserved by future `pull` runs.
-```
 
 ## What gets synced
 

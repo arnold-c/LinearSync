@@ -481,11 +481,15 @@ fn pull_issues(
         let url = issue["url"].as_str().unwrap_or("");
         let issue_id = issue["id"].as_str().unwrap_or("");
         let project = issue["project"]["name"].as_str().unwrap_or("");
-        let description = issue["description"]
+        let description_section = issue["description"]
             .as_str()
-            .unwrap_or("No description provided");
-
-        let formatted_description = description.replace("\n", "\n> ");
+            .map(str::trim)
+            .filter(|description| !description.is_empty())
+            .map(|description| {
+                let formatted_description = description.replace("\n", "\n> ");
+                format!(">[!info]+ Description\n> {formatted_description}\n\n")
+            })
+            .unwrap_or_default();
 
         let mut labels_yaml = String::new();
         if let Some(labels_nodes) = issue["labels"]["nodes"].as_array() {
@@ -532,8 +536,7 @@ fn pull_issues(
                     identifier,
                     url,
                     project,
-                    description,
-                    formatted_description: &formatted_description,
+                    description_section: &description_section,
                     labels_yaml: &labels_yaml,
                     gh_yaml: &gh_yaml,
                     now: &now,
@@ -547,7 +550,7 @@ fn pull_issues(
                 &labels_yaml,
                 &gh_yaml,
                 project,
-                &formatted_description,
+                &description_section,
                 url,
                 &now,
             ),
@@ -594,7 +597,12 @@ fn pull_issues(
                     reset = ANSI_RESET,
                 );
                 if use_delta {
-                    stats.delta_output.push_str(&format_delta_patch(identifier, &team.name, &file_path, &warning.diff));
+                    stats.delta_output.push_str(&format_delta_patch(
+                        identifier,
+                        &team.name,
+                        &file_path,
+                        &warning.diff,
+                    ));
                 } else {
                     print_colored_diff(&warning.diff);
                 }
@@ -612,8 +620,7 @@ struct TemplateContext<'a> {
     identifier: &'a str,
     url: &'a str,
     project: &'a str,
-    description: &'a str,
-    formatted_description: &'a str,
+    description_section: &'a str,
     labels_yaml: &'a str,
     gh_yaml: &'a str,
     now: &'a str,
@@ -681,8 +688,7 @@ fn render_template(template: &str, context: &TemplateContext<'_>) -> RenderedNot
         .replace("{{identifier}}", context.identifier)
         .replace("{{url}}", context.url)
         .replace("{{project}}", context.project)
-        .replace("{{description}}", context.description)
-        .replace("{{formatted_description}}", context.formatted_description)
+        .replace("{{description_section}}", context.description_section)
         .replace("{{labels_yaml}}", context.labels_yaml)
         .replace("{{github_links_yaml}}", context.gh_yaml)
         .replace("{{last_synced}}", context.now)
@@ -703,7 +709,7 @@ fn default_markdown_content(
     labels_yaml: &str,
     gh_yaml: &str,
     project: &str,
-    formatted_description: &str,
+    description_section: &str,
     url: &str,
     now: &str,
 ) -> RenderedNote {
@@ -717,10 +723,7 @@ linear_id: "{issue_id}"
 ---
 
 {MANAGED_SECTION_START}
->[!info]+ Description
-> {formatted_description}
-
-[Open in Linear]({url})
+{description_section}[Open in Linear]({url})
 
 ---
 *Last synced: {now}*
@@ -787,7 +790,7 @@ title: "{{title}}"
 status: "{{status}}"
 ---
 
-Body line
+{{description_section}}Body line
 "#;
 
         let rendered = render_template(
@@ -799,8 +802,7 @@ Body line
                 identifier: "ABC-1",
                 url: "https://linear.app/test",
                 project: "Project",
-                description: "Desc",
-                formatted_description: "Desc",
+                description_section: ">[!info]+ Description\n> Desc\n\n",
                 labels_yaml: "",
                 gh_yaml: "",
                 now: "2026-04-28 12:00:00",
@@ -812,6 +814,30 @@ Body line
         assert!(rendered.content.contains("title: \"Title\""));
         assert!(rendered.content.contains(MANAGED_SECTION_START));
         assert!(rendered.content.contains("Body line"));
+        assert!(rendered.content.contains(">[!info]+ Description"));
+    }
+
+    #[test]
+    fn template_omits_description_section_when_missing() {
+        let rendered = render_template(
+            "{{description_section}}Body line\n",
+            &TemplateContext {
+                title: "Title",
+                status: "Todo",
+                issue_id: "id-1",
+                identifier: "ABC-1",
+                url: "https://linear.app/test",
+                project: "Project",
+                description_section: "",
+                labels_yaml: "",
+                gh_yaml: "",
+                now: "2026-04-28 12:00:00",
+                team_name: "Team",
+            },
+        );
+
+        assert!(rendered.content.contains("Body line"));
+        assert!(!rendered.content.contains("Description"));
     }
 
     #[test]
@@ -875,8 +901,16 @@ new body
         );
 
         let warning = frontmatter_conflict_warning(existing, imported, &[]).unwrap();
-        assert!(warning.diff.contains("~ title: \"Local title\" -> \"Imported title\""));
-        assert!(warning.diff.contains("~ project: \"[[General]]\" -> \"[[Imported Project]]\""));
+        assert!(
+            warning
+                .diff
+                .contains("~ title: \"Local title\" -> \"Imported title\"")
+        );
+        assert!(
+            warning
+                .diff
+                .contains("~ project: \"[[General]]\" -> \"[[Imported Project]]\"")
+        );
         assert!(warning.diff.contains("- id: \"ACA-122\""));
     }
 
@@ -921,8 +955,7 @@ new body
                 identifier: "ABC-1",
                 url: "https://linear.app/test",
                 project: "Project",
-                description: "Desc",
-                formatted_description: "Desc",
+                description_section: ">[!info]+ Description\n> Desc\n\n",
                 labels_yaml: "",
                 gh_yaml: "",
                 now: "2026-04-28 12:00:00",
@@ -939,8 +972,14 @@ new body
             "<!-- linear-sync:managed:start -->\nold\n<!-- linear-sync:managed:end -->\n",
         );
 
-        let warning = frontmatter_conflict_warning(existing, &rendered.content, &rendered.ignored_properties).unwrap();
-        assert!(warning.diff.contains("~ title: \"Local title\" -> \"Imported title\""));
+        let warning =
+            frontmatter_conflict_warning(existing, &rendered.content, &rendered.ignored_properties)
+                .unwrap();
+        assert!(
+            warning
+                .diff
+                .contains("~ title: \"Local title\" -> \"Imported title\"")
+        );
         assert!(!warning.diff.contains("alias"));
         assert!(!warning.diff.contains("id: \"ACA-122\""));
     }
@@ -1012,9 +1051,17 @@ fn print_colored_diff(diff: &str) {
         if let Some(rest) = line.strip_prefix("- ") {
             println!("  {red}- {rest}{reset}", red = ANSI_RED, reset = ANSI_RESET);
         } else if let Some(rest) = line.strip_prefix("+ ") {
-            println!("  {green}+ {rest}{reset}", green = ANSI_GREEN, reset = ANSI_RESET);
+            println!(
+                "  {green}+ {rest}{reset}",
+                green = ANSI_GREEN,
+                reset = ANSI_RESET
+            );
         } else if let Some(rest) = line.strip_prefix("~ ") {
-            println!("  {blue}~ {rest}{reset}", blue = ANSI_BLUE, reset = ANSI_RESET);
+            println!(
+                "  {blue}~ {rest}{reset}",
+                blue = ANSI_BLUE,
+                reset = ANSI_RESET
+            );
         } else {
             println!("  {line}");
         }
@@ -1138,10 +1185,8 @@ fn merge_with_existing_note(
     let user_content = extract_user_content(&existing);
     let warning = frontmatter_conflict_warning(&existing, new_content, ignored_properties);
     let content_with_frontmatter = merge_frontmatter(&existing, new_content);
-    let content_with_conflict = insert_or_remove_conflict_section(
-        &content_with_frontmatter,
-        warning.as_ref(),
-    );
+    let content_with_conflict =
+        insert_or_remove_conflict_section(&content_with_frontmatter, warning.as_ref());
 
     let content = if let Some(user_content) = user_content {
         let trimmed_new = content_with_conflict.trim_end();
@@ -1161,14 +1206,18 @@ fn merge_frontmatter(existing: &str, new_content: &str) -> String {
         return new_content.to_string();
     };
 
-    format!("{existing_frontmatter}\n{}", new_body.trim_start_matches('\n'))
+    format!(
+        "{existing_frontmatter}\n{}",
+        new_body.trim_start_matches('\n')
+    )
 }
 
 fn insert_or_remove_conflict_section(
     new_content: &str,
     warning: Option<&FrontmatterWarning>,
 ) -> String {
-    let without_existing = remove_section(new_content, CONFLICT_SECTION_START, CONFLICT_SECTION_END);
+    let without_existing =
+        remove_section(new_content, CONFLICT_SECTION_START, CONFLICT_SECTION_END);
 
     let Some(warning) = warning else {
         return without_existing;
@@ -1185,7 +1234,10 @@ fn insert_or_remove_conflict_section(
     );
 
     if let Some((frontmatter, body)) = split_frontmatter(&without_existing) {
-        format!("{frontmatter}\n\n{conflict_block}\n{}", body.trim_start_matches('\n'))
+        format!(
+            "{frontmatter}\n\n{conflict_block}\n{}",
+            body.trim_start_matches('\n')
+        )
     } else {
         format!("{conflict_block}\n{without_existing}")
     }
@@ -1202,7 +1254,14 @@ fn frontmatter_conflict_warning(
     let existing_yaml = parse_frontmatter_map(existing_frontmatter)?;
     let new_yaml = parse_frontmatter_map(new_frontmatter)?;
 
-    let managed_keys = ["title", "status", "linear_id", "tags", "github_links", "project"];
+    let managed_keys = [
+        "title",
+        "status",
+        "linear_id",
+        "tags",
+        "github_links",
+        "project",
+    ];
     let mut keys = managed_keys
         .iter()
         .map(|key| key.to_string())

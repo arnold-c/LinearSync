@@ -8,9 +8,6 @@ ignored_properties: aliases, id
 ---
 
 <!-- linear-sync:managed:start -->
->[!info]+ Description
-> {{formatted_description}}
-
----
+{{description_section}}---
 *Last synced: {{last_synced}}*
 <!-- linear-sync:managed:end -->
