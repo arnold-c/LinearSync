@@ -13,6 +13,3 @@ linear_id: "[{{linear_id}}]({{url}})"
 ---
 *Last synced: {{last_synced}}*
 <!-- linear-sync:managed:end -->
-
-## My notes
-
