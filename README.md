@@ -89,6 +89,7 @@ Fetches active issues from Linear and writes them to Markdown files.
 - `--template <PATH>`: Use a specific Markdown template file for created notes
 - `-m, --merge-all-teams`: Merge issues from all teams into a single directory
 - `-c, --confirm`: Interactively confirm team selection, merge behavior, and output path
+- `--force`: Overwrite the entire note instead of only updating the managed section
 
 #### Examples
 
@@ -126,6 +127,12 @@ Use a specific template file:
 
 ```bash
 cargo run -- pull --template ./template.md
+```
+
+Force a full overwrite of existing notes:
+
+```bash
+cargo run -- pull --force
 ```
 
 ### `push`
@@ -174,7 +181,9 @@ Team names are slugified to lowercase and non-alphanumeric characters are replac
 
 ## Markdown Format
 
-Each issue is exported as a Markdown file with YAML frontmatter and a description block.
+Each issue is exported as a Markdown file with a managed section.
+By default, `pull` only updates that managed section and leaves the rest of the note untouched, so you can add your own notes outside it.
+Use `--force` to overwrite the full file.
 
 ### Templates
 
@@ -216,6 +225,7 @@ Supported placeholders:
 Example:
 
 ```md
+<!-- linear-sync:managed:start -->
 ---
 title: "Fix login redirect"
 status: "In Progress"
@@ -236,6 +246,11 @@ project: "[[Authentication]]"
 
 ---
 *Last synced: 2026-04-28 12:00:00*
+<!-- linear-sync:managed:end -->
+
+## My notes
+
+Anything outside the managed section is preserved by future `pull` runs.
 ```
 
 ## What gets synced

@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::OnceLock;
 
+const MANAGED_SECTION_START: &str = "<!-- linear-sync:managed:start -->";
+const MANAGED_SECTION_END: &str = "<!-- linear-sync:managed:end -->";
+
 const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
 const DEFAULT_OUTPUT_ROOT: &str = "linear-issues";
 const DEFAULT_TEMPLATE_PATH: &str = "template.md";
@@ -33,7 +36,7 @@ enum Commands {
     /// Pulls active issues from Linear and generates markdown files
     Pull {
         /// The UUID of the Linear Team. If omitted, pulls from all teams.
-        #[arg(short, long)]
+        #[arg(long)]
         team_id: Option<String>,
         /// The path to your Obsidian vault directory for issues.
         /// Defaults to linear-issues/<team-name>, linear-issues/<each-team-name>,
@@ -41,7 +44,7 @@ enum Commands {
         #[arg(short, long)]
         output_dir: Option<PathBuf>,
         /// Path to a Markdown template file used to structure created notes.
-        #[arg(short, long)]
+        #[arg(short = 'p', long)]
         template: Option<PathBuf>,
         /// Merge issues from all teams into a single subdirectory.
         #[arg(short = 'm', long)]
@@ -49,6 +52,9 @@ enum Commands {
         /// Interactively confirm the team selection, merge behavior, and output directory.
         #[arg(short = 'c', long)]
         confirm: bool,
+        /// Overwrite the entire note instead of only updating the managed section.
+        #[arg(long)]
+        force: bool,
     },
     /// Pushes local status updates back to Linear
     Push {
@@ -94,6 +100,7 @@ fn main() {
             template,
             merge_all_teams,
             confirm,
+            force,
         } => {
             pull_command(
                 &client,
@@ -103,6 +110,7 @@ fn main() {
                 template.clone(),
                 *merge_all_teams,
                 *confirm,
+                *force,
             );
         }
         Commands::Push { input_dir } => {
@@ -119,6 +127,7 @@ fn pull_command(
     template_path: Option<PathBuf>,
     merge_all_teams: bool,
     confirm: bool,
+    force: bool,
 ) {
     let teams = fetch_teams(client, api_key);
 
@@ -137,7 +146,14 @@ fn pull_command(
 
     match selection {
         PullSelection::SingleTeam { team, output_dir } => {
-            pull_issues(client, api_key, &team, &output_dir, template.as_deref());
+            pull_issues(
+                client,
+                api_key,
+                &team,
+                &output_dir,
+                template.as_deref(),
+                force,
+            );
         }
         PullSelection::AllTeams {
             root_output_dir,
@@ -155,6 +171,7 @@ fn pull_command(
                     &team,
                     &team_output_dir,
                     template.as_deref(),
+                    force,
                 );
             }
         }
@@ -360,6 +377,7 @@ fn pull_issues(
     team: &TeamInfo,
     output_dir: &PathBuf,
     template: Option<&str>,
+    force: bool,
 ) {
     let query = r#"
     query GetTeamIssues($teamId: String!) {
@@ -492,6 +510,15 @@ fn pull_issues(
             ),
         };
 
+        let markdown_content = if force {
+            markdown_content
+        } else {
+            merge_with_existing_note(
+                &file_path_for_issue(output_dir, status, identifier),
+                &markdown_content,
+            )
+        };
+
         let safe_status = status.to_lowercase().replace(' ', "-");
         let status_dir = output_dir.join(&safe_status);
         if !status_dir.exists() {
@@ -578,7 +605,7 @@ fn installed_template_path() -> Option<&'static PathBuf> {
 }
 
 fn render_template(template: &str, context: &TemplateContext<'_>) -> String {
-    template
+    let rendered = template
         .replace("{{title}}", context.title)
         .replace("{{status}}", context.status)
         .replace("{{linear_id}}", context.issue_id)
@@ -590,7 +617,9 @@ fn render_template(template: &str, context: &TemplateContext<'_>) -> String {
         .replace("{{labels_yaml}}", context.labels_yaml)
         .replace("{{github_links_yaml}}", context.gh_yaml)
         .replace("{{last_synced}}", context.now)
-        .replace("{{team_name}}", context.team_name)
+        .replace("{{team_name}}", context.team_name);
+
+    ensure_managed_section(&rendered)
 }
 
 fn default_markdown_content(
@@ -604,7 +633,7 @@ fn default_markdown_content(
     url: &str,
     now: &str,
 ) -> String {
-    format!(
+    let managed = format!(
         r#"---
 title: "{title}"
 status: "{status}"
@@ -614,15 +643,190 @@ linear_id: "{issue_id}"
 project: "[[{project}]]"
 ---
 
->[!info] Description
+{MANAGED_SECTION_START}
+>[!info]+ Description
 > {formatted_description}
 
 [Open in Linear]({url})
 
 ---
 *Last synced: {now}*
+{MANAGED_SECTION_END}
+
+## My notes
 "#
-    )
+    );
+
+    managed
+}
+
+fn ensure_managed_section(content: &str) -> String {
+    if content.contains(MANAGED_SECTION_START) && content.contains(MANAGED_SECTION_END) {
+        return content.to_string();
+    }
+
+    if let Some((frontmatter, body)) = split_frontmatter(content) {
+        let body = body.trim_start_matches('\n');
+        return format!(
+            "{frontmatter}\n{MANAGED_SECTION_START}\n{body}\n{MANAGED_SECTION_END}\n"
+        );
+    }
+
+    format!("{MANAGED_SECTION_START}\n{content}\n{MANAGED_SECTION_END}\n")
+}
+
+fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
+    let rest = content.strip_prefix("---\n")?;
+    let end = rest.find("\n---\n")?;
+    let frontmatter_end = 4 + end + 5;
+    Some((&content[..frontmatter_end], &content[frontmatter_end..]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_content_keeps_frontmatter_at_top() {
+        let content = default_markdown_content(
+            "Title",
+            "In Progress",
+            "id-1",
+            "",
+            "",
+            "Project",
+            "Desc",
+            "https://linear.app/test",
+            "2026-04-28 12:00:00",
+        );
+
+        assert!(content.starts_with("---\n"));
+        assert!(content.contains(MANAGED_SECTION_START));
+        assert!(content.contains(MANAGED_SECTION_END));
+        assert!(content.find(MANAGED_SECTION_START).unwrap() > 0);
+    }
+
+    #[test]
+    fn template_with_frontmatter_wraps_only_body() {
+        let template = r#"---
+title: "{{title}}"
+status: "{{status}}"
+---
+
+Body line
+"#;
+
+        let rendered = render_template(
+            template,
+            &TemplateContext {
+                title: "Title",
+                status: "Todo",
+                issue_id: "id-1",
+                identifier: "ABC-1",
+                url: "https://linear.app/test",
+                project: "Project",
+                description: "Desc",
+                formatted_description: "Desc",
+                labels_yaml: "",
+                gh_yaml: "",
+                now: "2026-04-28 12:00:00",
+                team_name: "Team",
+            },
+        );
+
+        assert!(rendered.starts_with("---\n"));
+        assert!(rendered.contains("title: \"Title\""));
+        assert!(rendered.contains(MANAGED_SECTION_START));
+        assert!(rendered.contains("Body line"));
+    }
+
+    #[test]
+    fn merge_repairs_note_that_only_has_managed_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("note.md");
+
+        fs::write(
+            &file_path,
+            format!(
+                "{MANAGED_SECTION_START}\nold body\n{MANAGED_SECTION_END}\n\nMy notes\n"
+            ),
+        )
+        .unwrap();
+
+        let new_content = r#"---
+title: "Title"
+status: "Todo"
+---
+
+<!-- linear-sync:managed:start -->
+new body
+<!-- linear-sync:managed:end -->
+
+## My notes
+"#;
+
+        let merged = merge_with_existing_note(&file_path, new_content);
+
+        assert!(merged.starts_with("---\n"));
+        assert!(merged.contains("title: \"Title\""));
+        assert!(merged.contains("new body"));
+        assert!(merged.contains("My notes"));
+    }
+}
+
+fn extract_managed_section(content: &str) -> Option<&str> {
+    let start = content.find(MANAGED_SECTION_START)?;
+    let after_start = start + MANAGED_SECTION_START.len();
+    let end_relative = content[after_start..].find(MANAGED_SECTION_END)?;
+    let end = after_start + end_relative + MANAGED_SECTION_END.len();
+    Some(&content[start..end])
+}
+
+fn extract_user_content(content: &str) -> Option<String> {
+    let managed = extract_managed_section(content)?;
+    let prefix = content.split_once(managed).map(|(before, _)| before).unwrap_or("");
+    let suffix = content
+        .rsplit_once(managed)
+        .map(|(_, after)| after)
+        .unwrap_or("");
+
+    let prefix_without_frontmatter = if let Some((_, rest)) = split_frontmatter(prefix) {
+        rest
+    } else {
+        prefix
+    };
+
+    let combined = format!("{}{}", prefix_without_frontmatter, suffix);
+    let trimmed = combined.trim();
+
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(format!("{}\n", trimmed))
+    }
+}
+
+fn merge_with_existing_note(file_path: &Path, new_content: &str) -> String {
+    let existing = match fs::read_to_string(file_path) {
+        Ok(content) => content,
+        Err(_) => return new_content.to_string(),
+    };
+
+    let user_content = extract_user_content(&existing);
+
+    if user_content.is_none() {
+        return new_content.to_string();
+    }
+
+    let trimmed_new = new_content.trim_end();
+    format!("{trimmed_new}\n\n{}", user_content.unwrap())
+}
+
+fn file_path_for_issue(output_dir: &Path, status: &str, identifier: &str) -> PathBuf {
+    let safe_status = status.to_lowercase().replace(' ', "-");
+    output_dir
+        .join(safe_status)
+        .join(format!("{}.md", identifier))
 }
 
 fn graphql_request(client: &Client, api_key: &str, query: &str, variables: Value) -> Value {
