@@ -832,6 +832,7 @@ new body
             "---\n",
             "title: \"Local title\"\n",
             "status: \"Todo\"\n",
+            "id: \"ACA-122\"\n",
             "tags:\n",
             "  - local-tag\n",
             "project: \"[[General]]\"\n",
@@ -857,6 +858,29 @@ new body
         let warning = frontmatter_conflict_warning(existing, imported).unwrap();
         assert!(warning.diff.contains("~ title: \"Local title\" -> \"Imported title\""));
         assert!(warning.diff.contains("~ project: \"[[General]]\" -> \"[[Imported Project]]\""));
+        assert!(warning.diff.contains("- id: \"ACA-122\""));
+    }
+
+    #[test]
+    fn merge_preserves_existing_frontmatter_keys() {
+        let existing = concat!(
+            "---\n",
+            "title: \"Local title\"\n",
+            "id: \"ACA-122\"\n",
+            "---\n\n",
+            "<!-- linear-sync:managed:start -->\nold\n<!-- linear-sync:managed:end -->\n",
+        );
+        let imported = concat!(
+            "---\n",
+            "title: \"Imported title\"\n",
+            "status: \"Todo\"\n",
+            "---\n\n",
+            "<!-- linear-sync:managed:start -->\nnew\n<!-- linear-sync:managed:end -->\n",
+        );
+
+        let merged = merge_frontmatter(existing, imported);
+        assert!(merged.contains("id: \"ACA-122\""));
+        assert!(merged.starts_with("---\n"));
     }
 }
 
@@ -1047,7 +1071,11 @@ fn merge_with_existing_note(file_path: &Path, new_content: &str) -> MergeResult 
 
     let user_content = extract_user_content(&existing);
     let warning = frontmatter_conflict_warning(&existing, new_content);
-    let content_with_conflict = insert_or_remove_conflict_section(new_content, warning.as_ref());
+    let content_with_frontmatter = merge_frontmatter(&existing, new_content);
+    let content_with_conflict = insert_or_remove_conflict_section(
+        &content_with_frontmatter,
+        warning.as_ref(),
+    );
 
     let content = if let Some(user_content) = user_content {
         let trimmed_new = content_with_conflict.trim_end();
@@ -1057,6 +1085,17 @@ fn merge_with_existing_note(file_path: &Path, new_content: &str) -> MergeResult 
     };
 
     MergeResult { content, warning }
+}
+
+fn merge_frontmatter(existing: &str, new_content: &str) -> String {
+    let Some((existing_frontmatter, _)) = split_frontmatter(existing) else {
+        return new_content.to_string();
+    };
+    let Some((_, new_body)) = split_frontmatter(new_content) else {
+        return new_content.to_string();
+    };
+
+    format!("{existing_frontmatter}\n{}", new_body.trim_start_matches('\n'))
 }
 
 fn insert_or_remove_conflict_section(
@@ -1094,10 +1133,23 @@ fn frontmatter_conflict_warning(existing: &str, new_content: &str) -> Option<Fro
     let new_yaml = parse_frontmatter_map(new_frontmatter)?;
 
     let managed_keys = ["title", "status", "linear_id", "tags", "github_links", "project"];
+    let mut keys = managed_keys
+        .iter()
+        .map(|key| key.to_string())
+        .collect::<Vec<_>>();
+
+    for key in existing_yaml.keys() {
+        if let YamlValue::String(key) = key {
+            if !keys.contains(key) {
+                keys.push(key.clone());
+            }
+        }
+    }
+
     let mut diff_lines = Vec::new();
 
-    for key in managed_keys {
-        let key_value = YamlValue::String(key.to_string());
+    for key in keys {
+        let key_value = YamlValue::String(key.clone());
         let existing_value = existing_yaml.get(&key_value);
         let new_value = new_yaml.get(&key_value);
 
@@ -1106,9 +1158,11 @@ fn frontmatter_conflict_warning(existing: &str, new_content: &str) -> Option<Fro
         }
 
         match (existing_value, new_value) {
-            (Some(old), Some(new)) => diff_lines.extend(render_modified_yaml_value_diff(key, old, new)),
-            (Some(old), None) => diff_lines.extend(render_yaml_value_diff('-', key, old)),
-            (None, Some(new)) => diff_lines.extend(render_yaml_value_diff('+', key, new)),
+            (Some(old), Some(new)) => {
+                diff_lines.extend(render_modified_yaml_value_diff(&key, old, new))
+            }
+            (Some(old), None) => diff_lines.extend(render_yaml_value_diff('-', &key, old)),
+            (None, Some(new)) => diff_lines.extend(render_yaml_value_diff('+', &key, new)),
             (None, None) => {}
         }
     }
