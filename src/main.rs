@@ -354,6 +354,9 @@ fn pull_issues(client: &Client, api_key: &str, team: &TeamInfo, output_dir: &Pat
                 name
               }
             }
+            project {
+                name
+            }
             attachments {
               nodes {
                 title
@@ -391,6 +394,7 @@ fn pull_issues(client: &Client, api_key: &str, team: &TeamInfo, output_dir: &Pat
         let status = issue["state"]["name"].as_str().unwrap_or("Todo");
         let url = issue["url"].as_str().unwrap_or("");
         let issue_id = issue["id"].as_str().unwrap_or("");
+        let project = issue["project"]["name"].as_str().unwrap_or("");
         let description = issue["description"]
             .as_str()
             .unwrap_or("No description provided");
@@ -438,7 +442,9 @@ title: "{title}"
 status: "{status}"
 priority: 0
 linear_id: "{issue_id}"
-{labels_yaml}{gh_yaml}---
+{labels_yaml}{gh_yaml}
+project: "[[{project}]]"
+---
 
 >[!info] Description
 > {formatted_description}
