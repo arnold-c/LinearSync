@@ -90,6 +90,7 @@ Fetches active issues from Linear and writes them to Markdown files.
 - `-m, --merge-all-teams`: Merge issues from all teams into a single directory
 - `-c, --confirm`: Interactively confirm team selection, merge behavior, and output path
 - `--force`: Overwrite the entire note instead of only updating the managed section
+- `--dry-run`: Preview note changes without writing files
 
 #### Examples
 
@@ -135,15 +136,41 @@ Force a full overwrite of existing notes:
 cargo run -- pull --force
 ```
 
+Preview a pull without writing files:
+
+```bash
+cargo run -- pull --dry-run
+```
+
 ### `push`
 
-Starts the push flow for local updates back to Linear.
+Checks local notes against Linear and reports differences.
+By default it does **not** push frontmatter changes automatically.
+Instead, it prints diffs to stdout and writes a warning block into the local note.
 
 ```bash
 cargo run -- push --input-dir /path/to/notes
 ```
 
-> Note: the current implementation only initializes the push command and does not yet sync changes back to Linear.
+#### Options
+
+- `-i, --input-dir <PATH>`: Root directory containing issue notes
+- `-p, --template <PATH>`: Use a specific template when diffing the managed block
+- `--force[=<PROPERTY,...>]`: Push supported frontmatter properties to Linear
+    - supported properties: `title`, `status`, `priority`, `project`, `tags`
+    - `--force` updates all supported differing properties found in the local note
+    - `--force=title,status` updates only the listed properties
+- `--dry-run`: Preview changes without updating Linear or editing local notes
+- `--no-delta`: Use YAML-style diff output instead of delta rendering
+
+#### Push behavior
+
+- The file name stem is the primary issue identifier, with `linear_id` used as a fallback
+    - This assumes that the note's file name has not been changed from the created on based on the Linear issue number
+- Frontmatter differences are reported unless they are listed in `ignored_properties`
+- Content outside the managed block is ignored by `push`
+- Managed block edits are reported, but never pushed; edit the issue in Linear instead
+- If a forced status update moves an issue to `Done`, the note is moved to the `done/` subdirectory
 
 ## Output Structure
 
@@ -185,9 +212,13 @@ Each issue is exported as a Markdown file with a managed section.
 By default, `pull` only updates that managed section and leaves the rest of the note untouched, so you can add your own notes outside it.
 Use `--force` to overwrite the full file.
 
+If Linear reports a new status but the matching note is found in a different status subdirectory,
+`pull` updates the note in place and inserts a warning telling you where to move it in Obsidian.
+This avoids breaking backlinks by renaming or moving the file automatically.
+
 ### Templates
 
-`pull` resolves templates in this order:
+`pull` and `push` resolve templates in this order:
 
 1. the path passed via `--template`
 2. `./template.md` in your current working directory
@@ -245,7 +276,7 @@ ignored_properties: aliases, id
 
 When an issue has no description, `{{description_section}}` renders as an empty string and the note omits the Description callout.
 
-Anything outside the managed section is preserved by future `pull` runs.
+Anything outside the managed section is preserved by future `pull` runs and ignored by `push`.
 
 ## What gets synced
 
@@ -278,7 +309,8 @@ This project uses:
 
 ## Limitations
 
-- `push` is not fully implemented yet
+- `push` only updates supported frontmatter-backed Linear fields when forced
+- Managed block changes are never pushed back to Linear
 - Error handling is mostly CLI-oriented and exits on API failures
 - Output format is opinionated toward Markdown note workflows
 

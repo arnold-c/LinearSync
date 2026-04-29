@@ -2,8 +2,9 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use dotenvy::dotenv;
 use reqwest::blocking::Client;
-use serde_json::{Value, json};
+use serde_json::{Map as JsonMap, Value, json};
 use serde_yaml::Value as YamlValue;
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -15,6 +16,10 @@ const MANAGED_SECTION_START: &str = "<!-- linear-sync:managed:start -->";
 const MANAGED_SECTION_END: &str = "<!-- linear-sync:managed:end -->";
 const CONFLICT_SECTION_START: &str = "<!-- linear-sync:frontmatter-conflict:start -->";
 const CONFLICT_SECTION_END: &str = "<!-- linear-sync:frontmatter-conflict:end -->";
+const PUSH_SYNC_SECTION_START: &str = "<!-- linear-sync:push-sync:start -->";
+const PUSH_SYNC_SECTION_END: &str = "<!-- linear-sync:push-sync:end -->";
+const NOTE_LOCATION_SECTION_START: &str = "<!-- linear-sync:note-location:start -->";
+const NOTE_LOCATION_SECTION_END: &str = "<!-- linear-sync:note-location:end -->";
 const ANSI_RED: &str = "\x1b[31m";
 const ANSI_GREEN: &str = "\x1b[32m";
 const ANSI_YELLOW: &str = "\x1b[33m";
@@ -70,11 +75,31 @@ enum Commands {
         #[arg(long)]
         no_delta: bool,
     },
-    /// Pushes local status updates back to Linear
+    /// Pushes local note metadata back to Linear
     Push {
         /// The path to your Obsidian vault directory
         #[arg(short, long)]
         input_dir: PathBuf,
+        /// Path to a Markdown template file used to diff managed note content.
+        #[arg(short = 'p', long)]
+        template: Option<PathBuf>,
+        /// Push selected frontmatter properties back to Linear.
+        /// Pass without a value to sync all supported differing properties.
+        /// Example: --force=title,status,priority
+        #[arg(
+            long,
+            num_args = 0..,
+            value_delimiter = ',',
+            require_equals = true,
+            default_missing_value = "__all__"
+        )]
+        force: Vec<String>,
+        /// Preview push changes without updating Linear or editing local notes.
+        #[arg(long)]
+        dry_run: bool,
+        /// Use YAML-style diff output instead of delta rendering.
+        #[arg(long)]
+        no_delta: bool,
     },
 }
 
@@ -82,6 +107,83 @@ enum Commands {
 struct TeamInfo {
     id: String,
     name: String,
+}
+
+#[derive(Clone, Debug)]
+struct WorkflowState {
+    id: String,
+    name: String,
+}
+
+#[derive(Clone, Debug)]
+struct LabelInfo {
+    id: String,
+    name: String,
+}
+
+#[derive(Clone, Debug)]
+struct ProjectInfo {
+    id: String,
+    name: String,
+}
+
+#[derive(Clone, Debug)]
+struct RemoteIssue {
+    id: String,
+    identifier: String,
+    title: String,
+    url: String,
+    description: String,
+    status: String,
+    priority: i64,
+    team: TeamInfo,
+    states: Vec<WorkflowState>,
+    labels: Vec<LabelInfo>,
+    available_labels: Vec<LabelInfo>,
+    project: Option<ProjectInfo>,
+    attachments: Vec<String>,
+}
+
+struct LocalNote {
+    path: PathBuf,
+    identifier: String,
+    content: String,
+    frontmatter: serde_yaml::Mapping,
+    ignored_properties: Vec<String>,
+    fallback_linear_id: Option<String>,
+}
+
+#[derive(Default)]
+struct PushStats {
+    scanned: usize,
+    updated: usize,
+    warnings: usize,
+    errors: usize,
+    moved: usize,
+}
+
+enum ForceSelection {
+    None,
+    All,
+    Selected(BTreeSet<String>),
+}
+
+fn parse_force_selection(values: &[String]) -> ForceSelection {
+    if values.is_empty() {
+        return ForceSelection::None;
+    }
+
+    if values.iter().any(|value| value == "__all__") {
+        return ForceSelection::All;
+    }
+
+    ForceSelection::Selected(
+        values
+            .iter()
+            .map(|value| normalize_frontmatter_key(value))
+            .filter(|value| !value.is_empty())
+            .collect(),
+    )
 }
 
 fn main() {
@@ -127,11 +229,26 @@ fn main() {
                 *merge_all_teams,
                 *confirm,
                 *force,
+                *dry_run,
                 !*no_delta,
             );
         }
-        Commands::Push { input_dir } => {
-            println!("Push command initiated for {:?}", input_dir);
+        Commands::Push {
+            input_dir,
+            template,
+            force,
+            dry_run,
+            no_delta,
+        } => {
+            push_command(
+                &client,
+                &api_key,
+                input_dir.clone(),
+                template.clone(),
+                parse_force_selection(force),
+                *dry_run,
+                !*no_delta,
+            );
         }
     }
 }
@@ -232,12 +349,285 @@ fn pull_command(
         }
     }
 }
+
+fn push_command(
+    client: &Client,
+    api_key: &str,
+    input_dir: PathBuf,
+    template_path: Option<PathBuf>,
+    force_selection: ForceSelection,
+    dry_run: bool,
+    use_delta: bool,
+) {
+    let template = load_template(template_path.as_deref());
+    let note_paths = discover_markdown_notes(&input_dir);
+
+    if note_paths.is_empty() {
+        println!("No markdown notes found under {}.", input_dir.display());
+        return;
+    }
+
+    let mut stats = PushStats::default();
+    for note_path in note_paths {
+        stats.scanned += 1;
+        let note_stats = push_note(
+            client,
+            api_key,
+            &note_path,
+            template.as_deref(),
+            &force_selection,
+            dry_run,
+            use_delta,
+        );
+        stats.updated += note_stats.updated;
+        stats.warnings += note_stats.warnings;
+        stats.errors += note_stats.errors;
+        stats.moved += note_stats.moved;
+    }
+
+    if dry_run {
+        println!(
+            "Dry run complete: scanned {} notes ({} updates planned, {} moves planned, {} warnings, {} errors).",
+            stats.scanned, stats.updated, stats.moved, stats.warnings, stats.errors
+        );
+    } else {
+        println!(
+            "Push complete: scanned {} notes ({} updated, {} moved, {} warnings, {} errors).",
+            stats.scanned, stats.updated, stats.moved, stats.warnings, stats.errors
+        );
+    }
+}
+
+fn push_note(
+    client: &Client,
+    api_key: &str,
+    note_path: &Path,
+    template: Option<&str>,
+    force_selection: &ForceSelection,
+    dry_run: bool,
+    use_delta: bool,
+) -> PushStats {
+    let mut stats = PushStats::default();
+
+    let local_note = match parse_local_note(note_path) {
+        Ok(note) => note,
+        Err(error) => {
             println!(
-                "Imported {} notes ({} warnings).",
-                total.imported, total.warnings
+                "{red}✗ Push error:{reset} {}\n  {error}",
+                note_path.display(),
+                red = ANSI_RED,
+                reset = ANSI_RESET,
             );
+            stats.errors += 1;
+            return stats;
+        }
+    };
+
+    let mut note_content = local_note.content.clone();
+
+    let remote_issue = match fetch_remote_issue_for_note(client, api_key, &local_note) {
+        Ok(Some(issue)) => issue,
+        Ok(None) => {
+            let warning = PushSyncWarning {
+                frontmatter: None,
+                managed: None,
+                notes: vec![format!(
+                    "Could not find a Linear issue for `{}`. The note name is not changed automatically; verify the file name stem or `linear_id` frontmatter.",
+                    local_note.identifier
+                )],
+            };
+            println!(
+                "{red}✗ Push error:{reset} {} ({})",
+                local_note.path.display(),
+                local_note.identifier,
+                red = ANSI_RED,
+                reset = ANSI_RESET,
+            );
+            if !dry_run {
+                note_content = insert_or_remove_push_sync_section(&note_content, Some(&warning));
+                if let Err(error) = fs::write(&local_note.path, note_content) {
+                    println!(
+                        "{red}✗ Push error:{reset} failed to write {}: {}",
+                        local_note.path.display(),
+                        error,
+                        red = ANSI_RED,
+                        reset = ANSI_RESET,
+                    );
+                }
+            }
+            stats.errors += 1;
+            stats.warnings += 1;
+            return stats;
+        }
+        Err(error) => {
+            let warning = PushSyncWarning {
+                frontmatter: None,
+                managed: None,
+                notes: vec![error.clone()],
+            };
+            println!(
+                "{red}✗ Push error:{reset} {}\n  {error}",
+                local_note.path.display(),
+                red = ANSI_RED,
+                reset = ANSI_RESET,
+            );
+            if !dry_run {
+                note_content = insert_or_remove_push_sync_section(&note_content, Some(&warning));
+                if let Err(write_error) = fs::write(&local_note.path, note_content) {
+                    println!(
+                        "{red}✗ Push error:{reset} failed to write {}: {}",
+                        local_note.path.display(),
+                        write_error,
+                        red = ANSI_RED,
+                        reset = ANSI_RESET,
+                    );
+                }
+            }
+            stats.errors += 1;
+            stats.warnings += 1;
+            return stats;
+        }
+    };
+
+    let mut remote_issue = remote_issue;
+    let mut final_status_for_path = remote_issue.status.clone();
+    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let mut remote_note = render_remote_issue_note(&remote_issue, template, &now);
+    let mut frontmatter_warning = push_frontmatter_diff_warning(
+        &local_note.content,
+        &remote_note.content,
+        &local_note.ignored_properties,
+    );
+    let mut managed_warning = managed_section_warning(&local_note.content, &remote_note.content);
+    let mut notes = Vec::new();
+
+    if let Some(warning) = &frontmatter_warning {
+        println!(
+            "{yellow}⚠ Frontmatter differs from Linear:{reset} {} ({})",
+            local_note.identifier,
+            local_note.path.display(),
+            yellow = ANSI_YELLOW,
+            reset = ANSI_RESET,
+        );
+        print_push_diff(
+            use_delta,
+            &local_note.identifier,
+            &format!("{} / frontmatter", remote_issue.team.name),
+            &local_note.path,
+            &warning.diff,
+        );
+    }
+
+    if let Some(warning) = &managed_warning {
+        println!(
+            "{yellow}⚠ Managed block differs from Linear:{reset} {} ({})",
+            local_note.identifier,
+            local_note.path.display(),
+            yellow = ANSI_YELLOW,
+            reset = ANSI_RESET,
+        );
+        print_push_diff(
+            use_delta,
+            &local_note.identifier,
+            &format!("{} / managed block", remote_issue.team.name),
+            &local_note.path,
+            &warning.diff,
+        );
+        println!("  Edit the issue in Linear instead of editing the managed block locally.");
+    }
+
+    let force_keys = resolve_force_keys(force_selection, frontmatter_warning.as_ref());
+    if let Some(force_keys) = force_keys {
+        let update_plan =
+            build_issue_update_input(client, api_key, &remote_issue, &local_note, &force_keys);
+
+        notes.extend(update_plan.notes.clone());
+
+        if !update_plan.input.is_empty() {
+            if dry_run {
+                println!(
+                    "{blue}ℹ Planned push:{reset} {} -> {}",
+                    local_note.identifier,
+                    update_plan.updated_keys.join(", "),
+                    blue = ANSI_BLUE,
+                    reset = ANSI_RESET,
+                );
+                stats.updated += 1;
+                if update_plan.will_move_to_done {
+                    stats.moved += 1;
+                }
+            } else {
+                match update_linear_issue(client, api_key, &remote_issue.id, update_plan.input) {
+                    Ok(()) => {
+                        stats.updated += 1;
+                        if update_plan.will_move_to_done {
+                            stats.moved += 1;
+                            final_status_for_path = "done".to_string();
+                            note_content =
+                                insert_or_remove_note_location_warning(&note_content, None);
+                        }
+                        if let Ok(Some(refetched_issue)) =
+                            fetch_remote_issue_by_id(client, api_key, &remote_issue.id)
+                        {
+                            remote_issue = refetched_issue;
+                            let refreshed_now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                            remote_note =
+                                render_remote_issue_note(&remote_issue, template, &refreshed_now);
+                            frontmatter_warning = push_frontmatter_diff_warning(
+                                &local_note.content,
+                                &remote_note.content,
+                                &local_note.ignored_properties,
+                            );
+                            managed_warning =
+                                managed_section_warning(&local_note.content, &remote_note.content);
+                        }
+                    }
+                    Err(error) => {
+                        notes.push(error.clone());
+                        println!(
+                            "{red}✗ Push error:{reset} {}\n  {error}",
+                            local_note.path.display(),
+                            red = ANSI_RED,
+                            reset = ANSI_RESET,
+                        );
+                        stats.errors += 1;
+                    }
+                }
+            }
         }
     }
+
+    let sync_warning =
+        if frontmatter_warning.is_some() || managed_warning.is_some() || !notes.is_empty() {
+            Some(PushSyncWarning {
+                frontmatter: frontmatter_warning,
+                managed: managed_warning,
+                notes,
+            })
+        } else {
+            None
+        };
+
+    if !dry_run {
+        note_content = insert_or_remove_push_sync_section(&note_content, sync_warning.as_ref());
+        let final_path = final_note_path_after_push(&local_note.path, &final_status_for_path);
+        if let Err(error) = write_note_to_path(&local_note.path, &final_path, &note_content) {
+            println!(
+                "{red}✗ Push error:{reset} failed to write {}: {}",
+                final_path.display(),
+                error,
+                red = ANSI_RED,
+                reset = ANSI_RESET,
+            );
+            stats.errors += 1;
+        }
+    }
+
+    if sync_warning.is_some() {
+        stats.warnings += 1;
+    }
+
+    stats
 }
 
 enum PullSelection {
@@ -433,6 +823,619 @@ fn fetch_teams(client: &Client, api_key: &str) -> Vec<TeamInfo> {
         .collect()
 }
 
+fn fetch_remote_issue_for_note(
+    client: &Client,
+    api_key: &str,
+    local_note: &LocalNote,
+) -> Result<Option<RemoteIssue>, String> {
+    if let Some(issue) = fetch_remote_issue_by_identifier(client, api_key, &local_note.identifier)?
+    {
+        return Ok(Some(issue));
+    }
+
+    match &local_note.fallback_linear_id {
+        Some(linear_id) if linear_id != &local_note.identifier => {
+            fetch_remote_issue_by_id(client, api_key, linear_id)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn fetch_remote_issue_by_identifier(
+    client: &Client,
+    api_key: &str,
+    identifier: &str,
+) -> Result<Option<RemoteIssue>, String> {
+    let mut last_shape_error =
+        match fetch_remote_issue_by_issue_v2_identifier(client, api_key, identifier) {
+            Ok(Some(issue)) => return Ok(Some(issue)),
+            Ok(None) => return Ok(None),
+            Err(error) if is_graphql_shape_error(&error) => Some(error),
+            Err(error) => return Err(error),
+        };
+
+    match fetch_remote_issue_by_id(client, api_key, identifier) {
+        Ok(Some(issue)) => return Ok(Some(issue)),
+        Ok(None) => {}
+        Err(error) if is_graphql_shape_error(&error) => last_shape_error = Some(error),
+        Err(error) => return Err(error),
+    }
+
+    if let Some((team_key, issue_number)) = parse_issue_identifier(identifier) {
+        match fetch_remote_issue_by_team_and_number(client, api_key, &team_key, issue_number) {
+            Ok(Some(issue)) => return Ok(Some(issue)),
+            Ok(None) => {}
+            Err(error) if is_graphql_shape_error(&error) => last_shape_error = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+
+    match last_shape_error {
+        Some(error) => Err(error),
+        None => Ok(None),
+    }
+}
+
+fn fetch_remote_issue_by_issue_v2_identifier(
+    client: &Client,
+    api_key: &str,
+    identifier: &str,
+) -> Result<Option<RemoteIssue>, String> {
+    let query = r#"
+    query GetIssueByIdentifier($identifier: String!) {
+      issueV2(identifier: $identifier) {
+        id
+        identifier
+        title
+        url
+        description
+        priority
+        state {
+          id
+          name
+        }
+        team {
+          id
+          name
+          states {
+            nodes {
+              id
+              name
+            }
+          }
+          labels {
+            nodes {
+              id
+              name
+            }
+          }
+        }
+        labels {
+          nodes {
+            id
+            name
+          }
+        }
+        project {
+          id
+          name
+        }
+        attachments {
+          nodes {
+            url
+          }
+        }
+      }
+    }
+    "#;
+
+    let response =
+        graphql_request_result(client, api_key, query, json!({ "identifier": identifier }))?;
+    let issue = response["data"]["issueV2"]
+        .as_object()
+        .cloned()
+        .map(Value::Object);
+    issue.map(parse_remote_issue).transpose()
+}
+
+fn fetch_remote_issue_by_team_and_number(
+    client: &Client,
+    api_key: &str,
+    team_key: &str,
+    issue_number: i64,
+) -> Result<Option<RemoteIssue>, String> {
+    let query = r#"
+    query GetIssueByTeamAndNumber($teamKey: String!, $issueNumber: Int!) {
+      team(id: $teamKey) {
+        issues(filter: { number: { eq: $issueNumber } }) {
+          nodes {
+            id
+            identifier
+            title
+            url
+            description
+            priority
+            state {
+              id
+              name
+            }
+            team {
+              id
+              name
+              states {
+                nodes {
+                  id
+                  name
+                }
+              }
+              labels {
+                nodes {
+                  id
+                  name
+                }
+              }
+            }
+            labels {
+              nodes {
+                id
+                name
+              }
+            }
+            project {
+              id
+              name
+            }
+            attachments {
+              nodes {
+                url
+              }
+            }
+          }
+        }
+      }
+    }
+    "#;
+
+    let response = graphql_request_result(
+        client,
+        api_key,
+        query,
+        json!({ "teamKey": team_key, "issueNumber": issue_number }),
+    )?;
+    let issue = response["data"]["team"]["issues"]["nodes"]
+        .as_array()
+        .and_then(|issues| issues.first())
+        .cloned();
+
+    issue.map(parse_remote_issue).transpose()
+}
+
+fn parse_issue_identifier(identifier: &str) -> Option<(String, i64)> {
+    let (team_key, issue_number) = identifier.split_once('-')?;
+    let team_key = team_key.trim();
+    let issue_number = issue_number.trim().parse::<i64>().ok()?;
+
+    if team_key.is_empty() {
+        None
+    } else {
+        Some((team_key.to_string(), issue_number))
+    }
+}
+
+fn is_graphql_shape_error(error: &str) -> bool {
+    error.contains("GRAPHQL_VALIDATION_FAILED")
+        || error.contains("Field \"")
+        || error.contains("Cannot query field")
+        || error.contains("Unknown argument")
+}
+
+fn fetch_remote_issue_by_id(
+    client: &Client,
+    api_key: &str,
+    issue_id: &str,
+) -> Result<Option<RemoteIssue>, String> {
+    let query = r#"
+    query GetIssueById($id: String!) {
+      issue(id: $id) {
+        id
+        identifier
+        title
+        url
+        description
+        priority
+        state {
+          id
+          name
+        }
+        team {
+          id
+          name
+          states {
+            nodes {
+              id
+              name
+            }
+          }
+          labels {
+            nodes {
+              id
+              name
+            }
+          }
+        }
+        labels {
+          nodes {
+            id
+            name
+          }
+        }
+        project {
+          id
+          name
+        }
+        attachments {
+          nodes {
+            url
+          }
+        }
+      }
+    }
+    "#;
+
+    let response = graphql_request_result(client, api_key, query, json!({ "id": issue_id }))?;
+    let issue = response["data"]["issue"]
+        .as_object()
+        .cloned()
+        .map(Value::Object);
+    issue.map(parse_remote_issue).transpose()
+}
+
+fn parse_remote_issue(issue: Value) -> Result<RemoteIssue, String> {
+    let id = issue["id"]
+        .as_str()
+        .ok_or_else(|| "Linear issue is missing an id".to_string())?
+        .to_string();
+    let identifier = issue["identifier"]
+        .as_str()
+        .ok_or_else(|| "Linear issue is missing an identifier".to_string())?
+        .to_string();
+    let title = issue["title"].as_str().unwrap_or("No Title").to_string();
+    let url = issue["url"].as_str().unwrap_or("").to_string();
+    let description = issue["description"].as_str().unwrap_or("").to_string();
+    let status = issue["state"]["name"]
+        .as_str()
+        .unwrap_or("Todo")
+        .to_string();
+    let priority = issue["priority"].as_i64().unwrap_or(0);
+
+    let team = TeamInfo {
+        id: issue["team"]["id"].as_str().unwrap_or("").to_string(),
+        name: issue["team"]["name"].as_str().unwrap_or("team").to_string(),
+    };
+
+    let states = issue["team"]["states"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|state| {
+            Some(WorkflowState {
+                id: state["id"].as_str()?.to_string(),
+                name: state["name"].as_str()?.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let labels = issue["labels"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|label| {
+            Some(LabelInfo {
+                id: label["id"].as_str()?.to_string(),
+                name: label["name"].as_str()?.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let available_labels = issue["team"]["labels"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|label| {
+            Some(LabelInfo {
+                id: label["id"].as_str()?.to_string(),
+                name: label["name"].as_str()?.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let project = issue["project"]["id"]
+        .as_str()
+        .map(|project_id| ProjectInfo {
+            id: project_id.to_string(),
+            name: issue["project"]["name"].as_str().unwrap_or("").to_string(),
+        });
+
+    let attachments = issue["attachments"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|attachment| attachment["url"].as_str().map(ToString::to_string))
+        .collect::<Vec<_>>();
+
+    Ok(RemoteIssue {
+        id,
+        identifier,
+        title,
+        url,
+        description,
+        status,
+        priority,
+        team,
+        states,
+        labels,
+        available_labels,
+        project,
+        attachments,
+    })
+}
+
+fn graphql_request_result(
+    client: &Client,
+    api_key: &str,
+    query: &str,
+    variables: Value,
+) -> Result<Value, String> {
+    let response = client
+        .post(LINEAR_API_URL)
+        .header("Authorization", api_key)
+        .header("Content-Type", "application/json")
+        .json(&json!({ "query": query, "variables": variables }))
+        .send()
+        .map_err(|error| format!("failed to send request to Linear API: {error}"))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|error| format!("failed to read Linear API response: {error}"))?;
+
+    if !status.is_success() {
+        return Err(format!("Linear API request failed with {status}: {body}"));
+    }
+
+    let value = serde_json::from_str::<Value>(&body)
+        .map_err(|error| format!("failed to parse Linear API response JSON: {error}"))?;
+
+    if let Some(errors) = value["errors"].as_array()
+        && !errors.is_empty()
+    {
+        return Err(format!(
+            "Linear API returned GraphQL errors: {}",
+            value["errors"]
+        ));
+    }
+
+    Ok(value)
+}
+
+fn resolve_state<'a>(
+    states: &'a [WorkflowState],
+    desired_status: &str,
+) -> Option<&'a WorkflowState> {
+    states
+        .iter()
+        .find(|state| state.name == desired_status)
+        .or_else(|| {
+            states
+                .iter()
+                .find(|state| state.name.eq_ignore_ascii_case(desired_status))
+        })
+        .or_else(|| {
+            let desired_slug = status_slug(desired_status);
+            states
+                .iter()
+                .find(|state| status_slug(&state.name) == desired_slug)
+        })
+}
+
+fn resolve_label<'a>(labels: &'a [LabelInfo], desired_label: &str) -> Option<&'a LabelInfo> {
+    labels
+        .iter()
+        .find(|label| label.name == desired_label)
+        .or_else(|| {
+            labels
+                .iter()
+                .find(|label| label.name.eq_ignore_ascii_case(desired_label))
+        })
+        .or_else(|| {
+            let desired_slug = status_slug(desired_label);
+            labels
+                .iter()
+                .find(|label| status_slug(&label.name) == desired_slug)
+        })
+}
+
+fn fetch_project_by_name(
+    client: &Client,
+    api_key: &str,
+    project_name: &str,
+) -> Result<Option<ProjectInfo>, String> {
+    let query = r#"
+    query GetProjectByName($projectName: String!) {
+      projects(filter: { name: { eq: $projectName } }) {
+        nodes {
+          id
+          name
+        }
+      }
+    }
+    "#;
+
+    let response = graphql_request_result(
+        client,
+        api_key,
+        query,
+        json!({ "projectName": project_name }),
+    )?;
+
+    Ok(response["data"]["projects"]["nodes"]
+        .as_array()
+        .and_then(|projects| projects.first())
+        .and_then(|project| {
+            Some(ProjectInfo {
+                id: project["id"].as_str()?.to_string(),
+                name: project["name"].as_str()?.to_string(),
+            })
+        }))
+}
+
+fn build_issue_update_input(
+    client: &Client,
+    api_key: &str,
+    remote_issue: &RemoteIssue,
+    local_note: &LocalNote,
+    selected_keys: &BTreeSet<String>,
+) -> IssueUpdatePlan {
+    let mut input = JsonMap::new();
+    let mut updated_keys = Vec::new();
+    let mut notes = Vec::new();
+    let mut will_move_to_done = false;
+
+    for key in selected_keys {
+        let key_value = YamlValue::String(key.clone());
+        let local_value = local_note.frontmatter.get(&key_value);
+
+        match key.as_str() {
+            "title" => match local_value.and_then(yaml_string) {
+                Some(title) => {
+                    input.insert("title".to_string(), json!(title));
+                    updated_keys.push(key.clone());
+                }
+                None => notes.push("`title` is not a scalar string in the local note.".to_string()),
+            },
+            "status" => match local_value.and_then(yaml_string) {
+                Some(status) => match resolve_state(&remote_issue.states, &status) {
+                    Some(state) => {
+                        input.insert("stateId".to_string(), json!(state.id));
+                        updated_keys.push(key.clone());
+                        will_move_to_done = status_slug(&state.name) == "done";
+                    }
+                    None => notes.push(format!(
+                        "`status` value `{status}` does not match any workflow state in team `{}`.",
+                        remote_issue.team.name
+                    )),
+                },
+                None => notes.push("`status` is not a scalar string in the local note.".to_string()),
+            },
+            "priority" => match local_value.and_then(yaml_i64) {
+                Some(priority) => {
+                    input.insert("priority".to_string(), json!(priority));
+                    updated_keys.push(key.clone());
+                }
+                None => notes.push("`priority` is not an integer in the local note.".to_string()),
+            },
+            "project" => match local_value.and_then(yaml_string) {
+                Some(project_name) => match normalize_project_name(&project_name) {
+                    Some(project_name) => match fetch_project_by_name(client, api_key, &project_name)
+                    {
+                        Ok(Some(project)) => {
+                            input.insert("projectId".to_string(), json!(project.id));
+                            updated_keys.push(key.clone());
+                        }
+                        Ok(None) => notes.push(format!(
+                            "No Linear project named `{project_name}` was found."
+                        )),
+                        Err(error) => notes.push(error),
+                    },
+                    None => {
+                        input.insert("projectId".to_string(), Value::Null);
+                        updated_keys.push(key.clone());
+                    }
+                },
+                None if matches!(local_value, Some(YamlValue::Null)) => {
+                    input.insert("projectId".to_string(), Value::Null);
+                    updated_keys.push(key.clone());
+                }
+                None => notes.push("`project` is not a scalar string in the local note.".to_string()),
+            },
+            "tags" => match local_value.and_then(yaml_string_list) {
+                Some(tags) => {
+                    let mut label_ids = Vec::new();
+                    let mut missing_labels = Vec::new();
+                    for tag in tags {
+                        match resolve_label(&remote_issue.available_labels, &tag) {
+                            Some(label) => label_ids.push(label.id.clone()),
+                            None => missing_labels.push(tag),
+                        }
+                    }
+
+                    if missing_labels.is_empty() {
+                        input.insert("labelIds".to_string(), json!(label_ids));
+                        updated_keys.push(key.clone());
+                    } else {
+                        notes.push(format!(
+                            "These tags were not found in team `{}`: {}.",
+                            remote_issue.team.name,
+                            missing_labels.join(", ")
+                        ));
+                    }
+                }
+                None if matches!(local_value, Some(YamlValue::Sequence(_))) => {
+                    input.insert("labelIds".to_string(), json!([]));
+                    updated_keys.push(key.clone());
+                }
+                None => notes.push("`tags` must be a YAML sequence or comma-separated string.".to_string()),
+            },
+            "linear_id" => notes.push("`linear_id` is read-only and cannot be pushed to Linear.".to_string()),
+            "github_links" => notes.push(
+                "`github_links` attachments are not pushed automatically; edit the issue in Linear."
+                    .to_string(),
+            ),
+            other => notes.push(format!(
+                "`{other}` is not a supported Linear push property."
+            )),
+        }
+    }
+
+    IssueUpdatePlan {
+        input,
+        updated_keys,
+        notes,
+        will_move_to_done,
+    }
+}
+
+fn update_linear_issue(
+    client: &Client,
+    api_key: &str,
+    issue_id: &str,
+    input: JsonMap<String, Value>,
+) -> Result<(), String> {
+    let query = r#"
+    mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
+      issueUpdate(id: $id, input: $input) {
+        success
+      }
+    }
+    "#;
+
+    let response = graphql_request_result(
+        client,
+        api_key,
+        query,
+        json!({ "id": issue_id, "input": Value::Object(input) }),
+    )?;
+
+    let success = response["data"]["issueUpdate"]["success"]
+        .as_bool()
+        .unwrap_or(false);
+    if success {
+        Ok(())
+    } else {
+        Err("Linear issue update did not report success.".to_string())
+    }
+}
+
 #[derive(Default)]
 struct PullStats {
     imported: usize,
@@ -447,6 +1450,7 @@ fn pull_issues(
     output_dir: &PathBuf,
     template: Option<&str>,
     force: bool,
+    dry_run: bool,
     use_delta: bool,
 ) -> PullStats {
     let query = r#"
@@ -495,7 +1499,7 @@ fn pull_issues(
         }
     };
 
-    if !output_dir.exists() {
+    if !dry_run && !output_dir.exists() {
         fs::create_dir_all(output_dir).expect("Failed to create output directory");
     }
 
@@ -586,7 +1590,16 @@ fn pull_issues(
 
         let markdown_content = rendered_note.content;
 
-        let issue_file_path = file_path_for_issue(output_dir, status, identifier);
+        let desired_file_path = file_path_for_issue(output_dir, status, identifier);
+        let existing_file_path = if desired_file_path.exists() {
+            desired_file_path.clone()
+        } else {
+            find_issue_note_in_other_status(output_dir, identifier)
+                .unwrap_or_else(|| desired_file_path.clone())
+        };
+        let location_warning =
+            note_location_warning(&existing_file_path, &desired_file_path, status, identifier);
+
         let merge_result = if force {
             MergeResult {
                 content: markdown_content,
@@ -594,33 +1607,52 @@ fn pull_issues(
             }
         } else {
             merge_with_existing_note(
-                &issue_file_path,
+                &existing_file_path,
                 &markdown_content,
                 &rendered_note.ignored_properties,
             )
         };
-        let markdown_content = merge_result.content;
+        let markdown_content = insert_or_remove_note_location_warning(
+            &merge_result.content,
+            location_warning.as_ref(),
+        );
 
-        let safe_status = status.to_lowercase().replace(' ', "-");
-        let status_dir = output_dir.join(&safe_status);
-        if !status_dir.exists() {
-            if let Err(e) = fs::create_dir_all(&status_dir) {
-                eprintln!("⚠️ Failed to create directory {:?}: {}", status_dir, e);
-            }
-        }
-
-        let file_path = status_dir.join(format!("{}.md", identifier));
-        if let Err(e) = fs::write(&file_path, &markdown_content) {
-            eprintln!("⚠️ Failed to write file {}.md: {}", identifier, e);
+        let wrote_note = if dry_run {
+            true
         } else {
+            if let Some(parent) = existing_file_path.parent()
+                && let Err(e) = fs::create_dir_all(parent)
+            {
+                eprintln!("⚠️ Failed to create directory {:?}: {}", parent, e);
+                false
+            } else if let Err(e) = fs::write(&existing_file_path, &markdown_content) {
+                eprintln!("⚠️ Failed to write file {}.md: {}", identifier, e);
+                false
+            } else {
+                true
+            }
+        };
+
+        if wrote_note {
             stats.imported += 1;
+            if let Some(warning) = location_warning {
+                stats.warnings += 1;
+                println!(
+                    "{yellow}⚠ Note location mismatch:{reset} {} ({}) -> move in Obsidian to {}",
+                    identifier,
+                    existing_file_path.display(),
+                    warning.desired_path.display(),
+                    yellow = ANSI_YELLOW,
+                    reset = ANSI_RESET,
+                );
+            }
             if let Some(warning) = merge_result.warning {
                 stats.warnings += 1;
                 println!(
                     "{yellow}⚠ Frontmatter conflict:{reset} {} ({}) -> {}",
                     identifier,
                     team.name,
-                    file_path.display(),
+                    existing_file_path.display(),
                     yellow = ANSI_YELLOW,
                     reset = ANSI_RESET,
                 );
@@ -628,7 +1660,7 @@ fn pull_issues(
                     stats.delta_output.push_str(&format_delta_patch(
                         identifier,
                         &team.name,
-                        &file_path,
+                        &existing_file_path,
                         &warning.diff,
                     ));
                 } else {
@@ -730,6 +1762,105 @@ fn render_template(template: &str, context: &TemplateContext<'_>) -> RenderedNot
     }
 }
 
+fn description_section_from_text(description: &str) -> String {
+    let description = description.trim();
+    if description.is_empty() {
+        String::new()
+    } else {
+        let formatted_description = description.replace("\n", "\n> ");
+        format!(">[!info]+ Description\n> {formatted_description}\n\n")
+    }
+}
+
+fn labels_yaml_from_names(names: &[String]) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+
+    let mut labels_yaml = String::from("tags:\n");
+    for name in names {
+        labels_yaml.push_str(&format!("  - {}\n", name.replace(' ', "-")));
+    }
+    labels_yaml
+}
+
+fn github_links_yaml_from_urls(urls: &[String]) -> String {
+    let github_urls = urls
+        .iter()
+        .filter(|url| {
+            url.contains("github.com") && (url.contains("/pull/") || url.contains("/issues/"))
+        })
+        .collect::<Vec<_>>();
+
+    if github_urls.is_empty() {
+        return String::new();
+    }
+
+    let mut gh_yaml = String::from("github_links:\n");
+    for url in github_urls {
+        gh_yaml.push_str(&format!("  - \"{}\"\n", url));
+    }
+    gh_yaml
+}
+
+fn render_remote_issue_note(
+    issue: &RemoteIssue,
+    template: Option<&str>,
+    now: &str,
+) -> RenderedNote {
+    let description_section = description_section_from_text(&issue.description);
+    let labels_yaml = labels_yaml_from_names(
+        &issue
+            .labels
+            .iter()
+            .map(|label| label.name.clone())
+            .collect::<Vec<_>>(),
+    );
+    let gh_yaml = github_links_yaml_from_urls(&issue.attachments);
+    let project_name = issue
+        .project
+        .as_ref()
+        .map(|project| project.name.as_str())
+        .unwrap_or("");
+
+    let mut rendered = match template {
+        Some(template) => render_template(
+            template,
+            &TemplateContext {
+                title: &issue.title,
+                status: &issue.status,
+                issue_id: &issue.id,
+                identifier: &issue.identifier,
+                url: &issue.url,
+                project: project_name,
+                description_section: &description_section,
+                labels_yaml: &labels_yaml,
+                gh_yaml: &gh_yaml,
+                now,
+                team_name: &issue.team.name,
+            },
+        ),
+        None => default_markdown_content(
+            &issue.title,
+            &issue.status,
+            &issue.id,
+            &labels_yaml,
+            &gh_yaml,
+            project_name,
+            &description_section,
+            &issue.url,
+            now,
+        ),
+    };
+
+    rendered.content = override_frontmatter_value(
+        &rendered.content,
+        "priority",
+        YamlValue::Number(issue.priority.into()),
+    );
+    rendered
+}
+
 fn default_markdown_content(
     title: &str,
     status: &str,
@@ -785,6 +1916,494 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
     let end = rest.find("\n---\n")?;
     let frontmatter_end = 4 + end + 5;
     Some((&content[..frontmatter_end], &content[frontmatter_end..]))
+}
+
+struct ManagedSectionWarning {
+    diff: String,
+}
+
+struct PushSyncWarning {
+    frontmatter: Option<FrontmatterWarning>,
+    managed: Option<ManagedSectionWarning>,
+    notes: Vec<String>,
+}
+
+struct NoteLocationWarning {
+    desired_path: PathBuf,
+    status: String,
+    identifier: String,
+}
+
+struct IssueUpdatePlan {
+    input: JsonMap<String, Value>,
+    updated_keys: Vec<String>,
+    notes: Vec<String>,
+    will_move_to_done: bool,
+}
+
+fn discover_markdown_notes(root: &Path) -> Vec<PathBuf> {
+    let mut notes = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(path) = stack.pop() {
+        let entries = match fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                stack.push(entry_path);
+            } else if entry_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| extension.eq_ignore_ascii_case("md"))
+                .unwrap_or(false)
+            {
+                notes.push(entry_path);
+            }
+        }
+    }
+
+    notes.sort();
+    notes
+}
+
+fn parse_local_note(path: &Path) -> Result<LocalNote, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {}", path.display(), error))?;
+    let (frontmatter, _) = split_frontmatter(&content)
+        .ok_or_else(|| "note is missing YAML frontmatter".to_string())?;
+    let frontmatter = parse_frontmatter_map(frontmatter)
+        .ok_or_else(|| "note frontmatter is not valid YAML".to_string())?;
+
+    let identifier = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::trim)
+        .filter(|stem| !stem.is_empty())
+        .ok_or_else(|| "note file name does not contain an issue identifier".to_string())?
+        .to_string();
+
+    let ignored_properties = extract_ignored_properties(&content);
+    let fallback_linear_id = extract_linear_id_from_frontmatter(&frontmatter);
+
+    Ok(LocalNote {
+        path: path.to_path_buf(),
+        identifier,
+        content,
+        frontmatter,
+        ignored_properties,
+        fallback_linear_id,
+    })
+}
+
+fn extract_linear_id_from_frontmatter(frontmatter: &serde_yaml::Mapping) -> Option<String> {
+    let value = frontmatter.get(YamlValue::String("linear_id".to_string()))?;
+    let value = yaml_string(value)?;
+    let value = value.trim();
+
+    if let Some(rest) = value.strip_prefix('[')
+        && let Some((label, _)) = rest.split_once(']')
+    {
+        let label = label.trim();
+        if !label.is_empty() {
+            return Some(label.to_string());
+        }
+    }
+
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn normalize_frontmatter_key(key: &str) -> String {
+    match key.trim().to_lowercase().as_str() {
+        "labels" | "label" => "tags".to_string(),
+        "state" => "status".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn status_slug(status: &str) -> String {
+    status.trim().to_lowercase().replace(' ', "-")
+}
+
+fn find_issue_note_in_other_status(output_dir: &Path, identifier: &str) -> Option<PathBuf> {
+    let target_name = format!("{}.md", identifier);
+    let entries = fs::read_dir(output_dir).ok()?;
+
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        if !entry_path.is_dir() {
+            continue;
+        }
+
+        let candidate = entry_path.join(&target_name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn note_location_warning(
+    current_path: &Path,
+    desired_path: &Path,
+    status: &str,
+    identifier: &str,
+) -> Option<NoteLocationWarning> {
+    if current_path == desired_path {
+        None
+    } else {
+        Some(NoteLocationWarning {
+            desired_path: desired_path.to_path_buf(),
+            status: status.to_string(),
+            identifier: identifier.to_string(),
+        })
+    }
+}
+
+fn insert_or_remove_generated_section(
+    content: &str,
+    start_marker: &str,
+    end_marker: &str,
+    block: Option<&str>,
+) -> String {
+    let without_existing = remove_section(content, start_marker, end_marker);
+    let Some(block) = block else {
+        return without_existing;
+    };
+
+    if let Some((frontmatter, body)) = split_frontmatter(&without_existing) {
+        format!(
+            "{frontmatter}\n\n{block}\n{}",
+            body.trim_start_matches('\n')
+        )
+    } else {
+        format!("{block}\n{without_existing}")
+    }
+}
+
+fn insert_or_remove_note_location_warning(
+    content: &str,
+    warning: Option<&NoteLocationWarning>,
+) -> String {
+    let block = warning.map(|warning| {
+        format!(
+            "{NOTE_LOCATION_SECTION_START}\n> [!warning] Move this note in Obsidian\n> Linear reports `{}` as status `{}`.\n> This file was updated in place to preserve backlinks.\n> Move it in Obsidian to `{}` so the folder matches the status.\n{NOTE_LOCATION_SECTION_END}\n",
+            warning.identifier,
+            warning.status,
+            warning.desired_path.display(),
+        )
+    });
+
+    insert_or_remove_generated_section(
+        content,
+        NOTE_LOCATION_SECTION_START,
+        NOTE_LOCATION_SECTION_END,
+        block.as_deref(),
+    )
+}
+
+fn insert_or_remove_push_sync_section(content: &str, warning: Option<&PushSyncWarning>) -> String {
+    let block = warning.map(|warning| {
+        let mut body = vec![
+            "> [!warning] Linear push requires review".to_string(),
+            "> This note still differs from Linear.".to_string(),
+        ];
+
+        if let Some(frontmatter) = &warning.frontmatter {
+            body.push(
+                "> Frontmatter differences were not fully pushed. Reconcile manually or run `push --force`."
+                    .to_string(),
+            );
+            body.push(">".to_string());
+            body.push("> Frontmatter diff:".to_string());
+            body.push("> ```diff".to_string());
+            body.extend(frontmatter.diff.lines().map(|line| format!("> {line}")));
+            body.push("> ```".to_string());
+        }
+
+        if let Some(managed) = &warning.managed {
+            body.push(">".to_string());
+            body.push("> Managed block diff (edit the issue in Linear instead):".to_string());
+            body.push("> ```diff".to_string());
+            body.extend(managed.diff.lines().map(|line| format!("> {line}")));
+            body.push("> ```".to_string());
+        }
+
+        if !warning.notes.is_empty() {
+            body.push(">".to_string());
+            body.push("> Notes:".to_string());
+            body.extend(warning.notes.iter().map(|note| format!("> - {note}")));
+        }
+
+        format!(
+            "{PUSH_SYNC_SECTION_START}\n{}\n{PUSH_SYNC_SECTION_END}\n",
+            body.join("\n")
+        )
+    });
+
+    insert_or_remove_generated_section(
+        content,
+        PUSH_SYNC_SECTION_START,
+        PUSH_SYNC_SECTION_END,
+        block.as_deref(),
+    )
+}
+
+fn extract_managed_section_body(content: &str) -> Option<&str> {
+    let managed = extract_managed_section(content)?;
+    let managed = managed.strip_prefix(MANAGED_SECTION_START)?;
+    let managed = managed.strip_suffix(MANAGED_SECTION_END)?;
+    Some(managed.trim())
+}
+
+fn normalize_managed_section_for_diff(content: &str) -> Vec<String> {
+    extract_managed_section_body(content)
+        .unwrap_or("")
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim_start().starts_with("*Last synced:"))
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn render_text_diff(local: &[String], remote: &[String]) -> Option<String> {
+    if local == remote {
+        return None;
+    }
+
+    let max_len = local.len().max(remote.len());
+    let mut diff = Vec::new();
+
+    for index in 0..max_len {
+        match (local.get(index), remote.get(index)) {
+            (Some(left), Some(right)) if left == right => {}
+            (Some(left), Some(right)) => {
+                diff.push(format!("- {}", left));
+                diff.push(format!("+ {}", right));
+            }
+            (Some(left), None) => diff.push(format!("- {}", left)),
+            (None, Some(right)) => diff.push(format!("+ {}", right)),
+            (None, None) => {}
+        }
+    }
+
+    Some(diff.join("\n"))
+}
+
+fn managed_section_warning(
+    local_content: &str,
+    remote_content: &str,
+) -> Option<ManagedSectionWarning> {
+    let local_lines = normalize_managed_section_for_diff(local_content);
+    let remote_lines = normalize_managed_section_for_diff(remote_content);
+    render_text_diff(&local_lines, &remote_lines).map(|diff| ManagedSectionWarning { diff })
+}
+
+fn push_frontmatter_diff_warning(
+    local_content: &str,
+    remote_content: &str,
+    ignored_properties: &[String],
+) -> Option<FrontmatterWarning> {
+    let (local_frontmatter, _) = split_frontmatter(local_content)?;
+    let (remote_frontmatter, _) = split_frontmatter(remote_content)?;
+
+    let local_yaml = parse_frontmatter_map(local_frontmatter)?;
+    let remote_yaml = parse_frontmatter_map(remote_frontmatter)?;
+
+    let keys = collect_frontmatter_keys(&local_yaml, &remote_yaml, ignored_properties);
+    let mut diff_lines = Vec::new();
+    let mut diff_keys = Vec::new();
+
+    for key in keys {
+        let key_value = YamlValue::String(key.clone());
+        let local_value = local_yaml.get(&key_value);
+        let remote_value = remote_yaml.get(&key_value);
+
+        if local_value == remote_value {
+            continue;
+        }
+
+        diff_keys.push(key.clone());
+        match (local_value, remote_value) {
+            (Some(old), Some(new)) => {
+                diff_lines.extend(render_modified_yaml_value_diff(&key, old, new))
+            }
+            (Some(old), None) => diff_lines.extend(render_yaml_value_diff('-', &key, old)),
+            (None, Some(new)) => diff_lines.extend(render_yaml_value_diff('+', &key, new)),
+            (None, None) => {}
+        }
+    }
+
+    if diff_lines.is_empty() {
+        None
+    } else {
+        Some(FrontmatterWarning {
+            diff: diff_lines.join("\n"),
+            keys: diff_keys,
+        })
+    }
+}
+
+fn collect_frontmatter_keys(
+    left: &serde_yaml::Mapping,
+    right: &serde_yaml::Mapping,
+    ignored_properties: &[String],
+) -> Vec<String> {
+    let mut keys = left
+        .keys()
+        .chain(right.keys())
+        .filter_map(|key| match key {
+            YamlValue::String(key) => Some(normalize_frontmatter_key(key)),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    keys.retain(|key| {
+        key != "ignored_properties"
+            && !ignored_properties
+                .iter()
+                .any(|ignored| normalize_frontmatter_key(ignored) == *key)
+    });
+
+    keys
+}
+
+fn resolve_force_keys(
+    force_selection: &ForceSelection,
+    warning: Option<&FrontmatterWarning>,
+) -> Option<BTreeSet<String>> {
+    match force_selection {
+        ForceSelection::None => None,
+        ForceSelection::All => Some(
+            warning
+                .map(|warning| warning.keys.iter().cloned().collect())
+                .unwrap_or_else(BTreeSet::new),
+        ),
+        ForceSelection::Selected(keys) => Some(keys.clone()),
+    }
+}
+
+fn yaml_string(value: &YamlValue) -> Option<String> {
+    match value {
+        YamlValue::String(value) => Some(value.trim().to_string()),
+        YamlValue::Number(value) => Some(value.to_string()),
+        YamlValue::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn yaml_i64(value: &YamlValue) -> Option<i64> {
+    match value {
+        YamlValue::Number(value) => value.as_i64(),
+        YamlValue::String(value) => value.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+fn yaml_string_list(value: &YamlValue) -> Option<Vec<String>> {
+    match value {
+        YamlValue::Sequence(values) => Some(
+            values
+                .iter()
+                .filter_map(yaml_string)
+                .map(|value| value.replace(' ', "-"))
+                .collect(),
+        ),
+        YamlValue::String(value) => Some(
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.replace(' ', "-"))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn normalize_project_name(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let trimmed = trimmed
+        .strip_prefix("[[")
+        .and_then(|value| value.strip_suffix("]]"))
+        .unwrap_or(trimmed)
+        .trim();
+
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn override_frontmatter_value(content: &str, key: &str, value: YamlValue) -> String {
+    let Some((frontmatter, body)) = split_frontmatter(content) else {
+        return content.to_string();
+    };
+    let Some(mut map) = parse_frontmatter_map(frontmatter) else {
+        return content.to_string();
+    };
+    let key_value = YamlValue::String(key.to_string());
+    if !map.contains_key(&key_value) {
+        return content.to_string();
+    }
+
+    map.insert(key_value, value);
+    let yaml = match serde_yaml::to_string(&map) {
+        Ok(yaml) => yaml,
+        Err(_) => return content.to_string(),
+    };
+
+    format!("---\n{}---\n{}", yaml, body)
+}
+
+fn final_note_path_after_push(current_path: &Path, status: &str) -> PathBuf {
+    if status_slug(status) != "done" {
+        return current_path.to_path_buf();
+    }
+
+    let Some(status_dir) = current_path.parent() else {
+        return current_path.to_path_buf();
+    };
+    let Some(root_dir) = status_dir.parent() else {
+        return current_path.to_path_buf();
+    };
+    let Some(file_name) = current_path.file_name() else {
+        return current_path.to_path_buf();
+    };
+
+    root_dir.join("done").join(file_name)
+}
+
+fn write_note_to_path(original_path: &Path, final_path: &Path, content: &str) -> io::Result<()> {
+    if original_path != final_path && final_path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("target note already exists at {}", final_path.display()),
+        ));
+    }
+
+    if let Some(parent) = final_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(final_path, content)?;
+
+    if original_path != final_path && original_path.exists() {
+        fs::remove_file(original_path)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1011,6 +2630,88 @@ new body
         assert!(!warning.diff.contains("alias"));
         assert!(!warning.diff.contains("id: \"ACA-122\""));
     }
+
+    #[test]
+    fn push_frontmatter_diff_uses_all_non_ignored_keys() {
+        let local = concat!(
+            "---\n",
+            "title: \"Local title\"\n",
+            "priority: 2\n",
+            "ignored_properties: aliases\n",
+            "aliases: keep-me\n",
+            "---\n\n",
+            "<!-- linear-sync:managed:start -->\n",
+            "Body\n",
+            "<!-- linear-sync:managed:end -->\n",
+        );
+        let remote = concat!(
+            "---\n",
+            "title: \"Remote title\"\n",
+            "priority: 1\n",
+            "---\n\n",
+            "<!-- linear-sync:managed:start -->\n",
+            "Body\n",
+            "<!-- linear-sync:managed:end -->\n",
+        );
+
+        let warning =
+            push_frontmatter_diff_warning(local, remote, &["aliases".to_string()]).unwrap();
+        assert!(
+            warning
+                .diff
+                .contains("~ title: \"Local title\" -> \"Remote title\"")
+        );
+        assert!(warning.diff.contains("~ priority: 2 -> 1"));
+        assert!(!warning.diff.contains("aliases"));
+    }
+
+    #[test]
+    fn managed_section_diff_ignores_last_synced_line() {
+        let local = concat!(
+            "---\n",
+            "title: \"Title\"\n",
+            "---\n\n",
+            "<!-- linear-sync:managed:start -->\n",
+            "Content\n",
+            "---\n",
+            "*Last synced: 2026-04-28 12:00:00*\n",
+            "<!-- linear-sync:managed:end -->\n",
+        );
+        let remote = concat!(
+            "---\n",
+            "title: \"Title\"\n",
+            "---\n\n",
+            "<!-- linear-sync:managed:start -->\n",
+            "Content\n",
+            "---\n",
+            "*Last synced: 2026-04-29 12:00:00*\n",
+            "<!-- linear-sync:managed:end -->\n",
+        );
+
+        assert!(managed_section_warning(local, remote).is_none());
+    }
+
+    #[test]
+    fn pull_location_warning_is_inserted_after_frontmatter() {
+        let content = concat!(
+            "---\n",
+            "title: \"Title\"\n",
+            "---\n\n",
+            "<!-- linear-sync:managed:start -->\n",
+            "Body\n",
+            "<!-- linear-sync:managed:end -->\n",
+        );
+
+        let warning = NoteLocationWarning {
+            desired_path: PathBuf::from("linear-issues/done/ABC-1.md"),
+            status: "Done".to_string(),
+            identifier: "ABC-1".to_string(),
+        };
+
+        let updated = insert_or_remove_note_location_warning(content, Some(&warning));
+        assert!(updated.contains("Move this note in Obsidian"));
+        assert!(updated.contains("linear-issues/done/ABC-1.md"));
+    }
 }
 
 fn extract_managed_section(content: &str) -> Option<&str> {
@@ -1044,6 +2745,12 @@ fn remove_section(content: &str, start_marker: &str, end_marker: &str) -> String
 
 fn extract_user_content(content: &str) -> Option<String> {
     let content = remove_section(content, CONFLICT_SECTION_START, CONFLICT_SECTION_END);
+    let content = remove_section(&content, PUSH_SYNC_SECTION_START, PUSH_SYNC_SECTION_END);
+    let content = remove_section(
+        &content,
+        NOTE_LOCATION_SECTION_START,
+        NOTE_LOCATION_SECTION_END,
+    );
     let managed = extract_managed_section(&content)?;
     let prefix = content
         .split_once(managed)
@@ -1072,6 +2779,7 @@ fn extract_user_content(content: &str) -> Option<String> {
 
 struct FrontmatterWarning {
     diff: String,
+    keys: Vec<String>,
 }
 
 fn print_colored_diff(diff: &str) {
@@ -1093,6 +2801,20 @@ fn print_colored_diff(diff: &str) {
         } else {
             println!("  {line}");
         }
+    }
+}
+
+fn print_push_diff(
+    use_delta: bool,
+    identifier: &str,
+    diff_label: &str,
+    file_path: &Path,
+    diff: &str,
+) {
+    if use_delta {
+        print_delta_output(&format_delta_patch(identifier, diff_label, file_path, diff));
+    } else {
+        print_colored_diff(diff);
     }
 }
 
@@ -1331,6 +3053,7 @@ fn frontmatter_conflict_warning(
     } else {
         Some(FrontmatterWarning {
             diff: diff_lines.join("\n"),
+            keys: Vec::new(),
         })
     }
 }
@@ -1431,9 +3154,8 @@ fn yaml_scalar_for_diff(value: &YamlValue) -> String {
 }
 
 fn file_path_for_issue(output_dir: &Path, status: &str, identifier: &str) -> PathBuf {
-    let safe_status = status.to_lowercase().replace(' ', "-");
     output_dir
-        .join(safe_status)
+        .join(status_slug(status))
         .join(format!("{}.md", identifier))
 }
 
