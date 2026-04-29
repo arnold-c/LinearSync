@@ -79,7 +79,8 @@ Or with the built binary:
 
 ### `pull`
 
-Fetches active issues from Linear and writes them to Markdown files.
+Fetches issues from Linear and writes them to Markdown files.
+By default, issues already in `Done` are skipped unless they need to be moved from a non-`done` location.
 
 #### Options
 
@@ -91,6 +92,7 @@ Fetches active issues from Linear and writes them to Markdown files.
 - `-m, --merge-all-teams`: Merge issues from all teams into a single directory
 - `-c, --confirm`: Interactively confirm team selection, merge behavior, and output path
 - `--force`: Overwrite the entire note instead of only updating the managed section
+- `--include-done`: Include issues already in `done/` or not yet created locally with a `Done` status
 - `--dry-run`: Preview note changes without writing files
 
 #### Examples
@@ -149,6 +151,12 @@ Preview a pull without writing files:
 cargo run -- pull --dry-run
 ```
 
+Include all Done issues too:
+
+```bash
+cargo run -- pull --include-done
+```
+
 ### `push`
 
 Checks local notes against Linear and reports differences.
@@ -174,6 +182,7 @@ cargo run -- push --input-dir /path/to/notes --issue-id ACA-125
     - supported properties: `title`, `status`, `priority`, `project`, `tags`
     - `--force` updates all supported differing properties found in the local note
     - `--force=title,status` updates only the listed properties
+- `--include-done`: Include notes already under a `done/` subdirectory
 - `--dry-run`: Preview changes without updating Linear or editing local notes
 - `--no-delta`: Use YAML-style diff output instead of delta rendering
 
@@ -184,7 +193,10 @@ cargo run -- push --input-dir /path/to/notes --issue-id ACA-125
 - Frontmatter differences are reported unless they are listed in `ignored_properties`
 - Content outside the managed block is ignored by `push`
 - Managed block edits are reported, but never pushed; edit the issue in Linear instead
+- By default, `push` skips notes already under `done/`; use `--include-done` to scan them
 - If a forced status update moves an issue to `Done`, the note is moved to the `done/` subdirectory
+- By default, `pull` skips issues already `Done` when they already live in `done/` or do not yet exist locally
+- Issues transitioning between active statuses and `Done` are always processed so the corresponding note is updated or moved
 - With `--issue-id`, `pull` and `push` only act on the matching issue while preserving the same location mismatch warnings and move/update guidance
 
 ## Output Structure

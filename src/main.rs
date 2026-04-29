@@ -71,6 +71,10 @@ enum Commands {
         /// Overwrite the entire note instead of only updating the managed section.
         #[arg(long)]
         force: bool,
+        /// Include Done issues that are already in the done subdirectory or do not yet exist locally.
+        /// Issues transitioning to Done are always processed.
+        #[arg(long)]
+        include_done: bool,
         /// Preview note changes without writing files.
         #[arg(long)]
         dry_run: bool,
@@ -100,6 +104,10 @@ enum Commands {
             default_missing_value = "__all__"
         )]
         force: Vec<String>,
+        /// Include notes already under a done subdirectory.
+        /// Notes transitioning to Done are always processed.
+        #[arg(long)]
+        include_done: bool,
         /// Preview push changes without updating Linear or editing local notes.
         #[arg(long)]
         dry_run: bool,
@@ -246,6 +254,7 @@ fn main() {
             merge_all_teams,
             confirm,
             force,
+            include_done,
             dry_run,
             no_delta,
         } => {
@@ -261,6 +270,7 @@ fn main() {
                 *merge_all_teams,
                 *confirm,
                 *force,
+                *include_done,
                 *dry_run,
                 !*no_delta,
             );
@@ -270,6 +280,7 @@ fn main() {
             issue_id,
             template,
             force,
+            include_done,
             dry_run,
             no_delta,
         } => {
@@ -282,6 +293,7 @@ fn main() {
                 issue_id.clone(),
                 template.clone(),
                 parse_force_selection(force),
+                *include_done,
                 *dry_run,
                 !*no_delta,
             );
@@ -300,6 +312,7 @@ fn pull_command(
     merge_all_teams: bool,
     confirm: bool,
     force: bool,
+    include_done: bool,
     dry_run: bool,
     use_delta: bool,
 ) {
@@ -332,6 +345,7 @@ fn pull_command(
                 selected_issue.as_ref(),
                 template.as_deref(),
                 force,
+                include_done,
                 dry_run,
                 use_delta,
             );
@@ -370,6 +384,7 @@ fn pull_command(
                     selected_issue.as_ref(),
                     template.as_deref(),
                     force,
+                    include_done,
                     dry_run,
                     use_delta,
                 );
@@ -403,13 +418,14 @@ fn push_command(
     issue_id: Option<String>,
     template_path: Option<PathBuf>,
     force_selection: ForceSelection,
+    include_done: bool,
     dry_run: bool,
     use_delta: bool,
 ) {
     let template = load_template(template_path.as_deref());
     let note_paths = match issue_id.as_deref() {
-        Some(identifier) => discover_markdown_notes_for_issue(&input_dir, identifier),
-        None => discover_markdown_notes(&input_dir),
+        Some(identifier) => discover_markdown_notes_for_issue(&input_dir, identifier, include_done),
+        None => discover_markdown_notes(&input_dir, include_done),
     };
 
     if note_paths.is_empty() {
@@ -1561,13 +1577,14 @@ fn pull_issues(
     selected_issue: Option<&RemoteIssue>,
     template: Option<&str>,
     force: bool,
+    include_done: bool,
     dry_run: bool,
     use_delta: bool,
 ) -> PullStats {
     let query = r#"
     query GetTeamIssues($teamId: String!) {
       team(id: $teamId) {
-        issues(filter: { state: { type: { in: ["started", "unstarted"] } } }) {
+        issues {
           nodes {
             id
             identifier
@@ -1720,6 +1737,14 @@ fn pull_issues(
         };
         let location_warning =
             note_location_warning(&existing_file_path, &desired_file_path, status, identifier);
+        if !include_done_issue(
+            include_done,
+            status,
+            &desired_file_path,
+            existing_file_path.as_path(),
+        ) {
+            continue;
+        }
 
         let merge_result = if force {
             MergeResult {
@@ -2066,7 +2091,7 @@ struct IssueUpdatePlan {
     will_move_to_done: bool,
 }
 
-fn discover_markdown_notes(root: &Path) -> Vec<PathBuf> {
+fn discover_markdown_notes(root: &Path, include_done: bool) -> Vec<PathBuf> {
     let mut notes = Vec::new();
     let mut stack = vec![root.to_path_buf()];
 
@@ -2079,6 +2104,9 @@ fn discover_markdown_notes(root: &Path) -> Vec<PathBuf> {
         for entry in entries.flatten() {
             let entry_path = entry.path();
             if entry_path.is_dir() {
+                if !include_done && is_done_directory(&entry_path) {
+                    continue;
+                }
                 stack.push(entry_path);
             } else if entry_path
                 .extension()
@@ -2095,8 +2123,8 @@ fn discover_markdown_notes(root: &Path) -> Vec<PathBuf> {
     notes
 }
 
-fn discover_markdown_notes_for_issue(root: &Path, identifier: &str) -> Vec<PathBuf> {
-    discover_markdown_notes(root)
+fn discover_markdown_notes_for_issue(root: &Path, identifier: &str, include_done: bool) -> Vec<PathBuf> {
+    discover_markdown_notes(root, include_done)
         .into_iter()
         .filter(|path| {
             path.file_stem()
@@ -2167,6 +2195,26 @@ fn normalize_frontmatter_key(key: &str) -> String {
 
 fn status_slug(status: &str) -> String {
     status.trim().to_lowercase().replace(' ', "-")
+}
+
+fn is_done_directory(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.eq_ignore_ascii_case("done"))
+        .unwrap_or(false)
+}
+
+fn include_done_issue(
+    include_done: bool,
+    status: &str,
+    desired_file_path: &Path,
+    existing_file_path: &Path,
+) -> bool {
+    if status_slug(status) != "done" {
+        return true;
+    }
+
+    include_done || existing_file_path != desired_file_path
 }
 
 fn find_issue_note_in_other_status(output_dir: &Path, identifier: &str) -> Option<PathBuf> {
