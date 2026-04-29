@@ -681,6 +681,7 @@ fn push_note(
 
     if !dry_run {
         note_content = insert_or_remove_push_sync_section(&note_content, sync_warning.as_ref());
+        note_content = insert_or_remove_conflict_section(&note_content, None);
         let final_path = final_note_path_after_push(&local_note.path, &final_status_for_path);
         if let Err(error) = write_note_to_path(&local_note.path, &final_path, &note_content) {
             println!(
