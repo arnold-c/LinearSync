@@ -110,6 +110,12 @@ struct TeamInfo {
 }
 
 #[derive(Clone, Debug)]
+struct PriorityInfo {
+    priority: i64,
+    label: String,
+}
+
+#[derive(Clone, Debug)]
 struct WorkflowState {
     id: String,
     name: String,
@@ -186,6 +192,22 @@ fn parse_force_selection(values: &[String]) -> ForceSelection {
     )
 }
 
+fn get_priority_label<'a>(priority_values: &'a [PriorityInfo], priority: i64) -> &'a str {
+    priority_values
+        .iter()
+        .find(|v| v.priority == priority)
+        .map(|v| v.label.as_str())
+        .unwrap_or("No priority")
+}
+
+fn get_priority_number(priority_values: &[PriorityInfo], label: &str) -> Option<i64> {
+    priority_values
+        .iter()
+        .find(|v| v.label.eq_ignore_ascii_case(label))
+        .map(|v| v.priority)
+        .or_else(|| label.parse::<i64>().ok())
+}
+
 fn main() {
     dotenv().ok();
     initialize_installed_template_path();
@@ -220,9 +242,11 @@ fn main() {
             dry_run,
             no_delta,
         } => {
+            let priority_values = fetch_priority_values(&client, &api_key);
             pull_command(
                 &client,
                 &api_key,
+                &priority_values,
                 team_id.clone(),
                 output_dir.clone(),
                 template.clone(),
@@ -240,9 +264,11 @@ fn main() {
             dry_run,
             no_delta,
         } => {
+            let priority_values = fetch_priority_values(&client, &api_key);
             push_command(
                 &client,
                 &api_key,
+                &priority_values,
                 input_dir.clone(),
                 template.clone(),
                 parse_force_selection(force),
@@ -256,6 +282,7 @@ fn main() {
 fn pull_command(
     client: &Client,
     api_key: &str,
+    priority_values: &[PriorityInfo],
     team_id: Option<String>,
     output_dir: Option<PathBuf>,
     template_path: Option<PathBuf>,
@@ -285,6 +312,7 @@ fn pull_command(
             let stats = pull_issues(
                 client,
                 api_key,
+                priority_values,
                 &team,
                 &output_dir,
                 template.as_deref(),
@@ -321,6 +349,7 @@ fn pull_command(
                 let stats = pull_issues(
                     client,
                     api_key,
+                    priority_values,
                     &team,
                     &team_output_dir,
                     template.as_deref(),
@@ -353,6 +382,7 @@ fn pull_command(
 fn push_command(
     client: &Client,
     api_key: &str,
+    priority_values: &[PriorityInfo],
     input_dir: PathBuf,
     template_path: Option<PathBuf>,
     force_selection: ForceSelection,
@@ -373,6 +403,7 @@ fn push_command(
         let note_stats = push_note(
             client,
             api_key,
+            priority_values,
             &note_path,
             template.as_deref(),
             &force_selection,
@@ -401,6 +432,7 @@ fn push_command(
 fn push_note(
     client: &Client,
     api_key: &str,
+    priority_values: &[PriorityInfo],
     note_path: &Path,
     template: Option<&str>,
     force_selection: &ForceSelection,
@@ -492,7 +524,7 @@ fn push_note(
     let mut remote_issue = remote_issue;
     let mut final_status_for_path = remote_issue.status.clone();
     let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let mut remote_note = render_remote_issue_note(&remote_issue, template, &now);
+    let mut remote_note = render_remote_issue_note(&remote_issue, template, &now, priority_values);
     let mut frontmatter_warning = push_frontmatter_diff_warning(
         &local_note.content,
         &remote_note.content,
@@ -538,8 +570,14 @@ fn push_note(
 
     let force_keys = resolve_force_keys(force_selection, frontmatter_warning.as_ref());
     if let Some(force_keys) = force_keys {
-        let update_plan =
-            build_issue_update_input(client, api_key, &remote_issue, &local_note, &force_keys);
+        let update_plan = build_issue_update_input(
+            client,
+            api_key,
+            priority_values,
+            &remote_issue,
+            &local_note,
+            &force_keys,
+        );
 
         notes.extend(update_plan.notes.clone());
 
@@ -572,7 +610,7 @@ fn push_note(
                             remote_issue = refetched_issue;
                             let refreshed_now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
                             remote_note =
-                                render_remote_issue_note(&remote_issue, template, &refreshed_now);
+                                render_remote_issue_note(&remote_issue, template, &refreshed_now, priority_values);
                             frontmatter_warning = push_frontmatter_diff_warning(
                                 &local_note.content,
                                 &remote_note.content,
@@ -818,6 +856,35 @@ fn fetch_teams(client: &Client, api_key: &str) -> Vec<TeamInfo> {
             Some(TeamInfo {
                 id: team["id"].as_str()?.to_string(),
                 name: team["name"].as_str()?.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn fetch_priority_values(client: &Client, api_key: &str) -> Vec<PriorityInfo> {
+    let query = r#"
+    query GetPriorityValues {
+      issuePriorityValues {
+        priority
+        label
+      }
+    }
+    "#;
+
+    let response = graphql_request(client, api_key, query, json!({}));
+    let values = response["data"]["issuePriorityValues"]
+        .as_array()
+        .unwrap_or_else(|| {
+            eprintln!("❌ Error: Could not retrieve issue priority values from Linear.");
+            process::exit(1);
+        });
+
+    values
+        .iter()
+        .filter_map(|val| {
+            Some(PriorityInfo {
+                priority: val["priority"].as_i64()?,
+                label: val["label"].as_str()?.to_string(),
             })
         })
         .collect()
@@ -1292,6 +1359,7 @@ fn fetch_project_by_name(
 fn build_issue_update_input(
     client: &Client,
     api_key: &str,
+    priority_values: &[PriorityInfo],
     remote_issue: &RemoteIssue,
     local_note: &LocalNote,
     selected_keys: &BTreeSet<String>,
@@ -1327,13 +1395,20 @@ fn build_issue_update_input(
                 },
                 None => notes.push("`status` is not a scalar string in the local note.".to_string()),
             },
-            "priority" => match local_value.and_then(yaml_i64) {
-                Some(priority) => {
-                    input.insert("priority".to_string(), json!(priority));
-                    updated_keys.push(key.clone());
+            "priority" => {
+                let parsed_priority = match local_value {
+                    Some(YamlValue::String(s)) => get_priority_number(priority_values, s),
+                    Some(YamlValue::Number(n)) => n.as_i64(),
+                    _ => None,
+                };
+                match parsed_priority {
+                    Some(priority) => {
+                        input.insert("priority".to_string(), json!(priority));
+                        updated_keys.push(key.clone());
+                    }
+                    None => notes.push("`priority` must be a valid priority string or integer in the local note.".to_string()),
                 }
-                None => notes.push("`priority` is not an integer in the local note.".to_string()),
-            },
+            }
             "project" => match local_value.and_then(yaml_string) {
                 Some(project_name) => match normalize_project_name(&project_name) {
                     Some(project_name) => match fetch_project_by_name(client, api_key, &project_name)
@@ -1446,6 +1521,7 @@ struct PullStats {
 fn pull_issues(
     client: &Client,
     api_key: &str,
+    priority_values: &[PriorityInfo],
     team: &TeamInfo,
     output_dir: &PathBuf,
     template: Option<&str>,
@@ -1466,6 +1542,7 @@ fn pull_issues(
             state {
               name
             }
+            priority
             labels {
               nodes {
                 name
@@ -1510,6 +1587,8 @@ fn pull_issues(
         let identifier = issue["identifier"].as_str().unwrap_or("UNKNOWN");
         let title = issue["title"].as_str().unwrap_or("No Title");
         let status = issue["state"]["name"].as_str().unwrap_or("Todo");
+        let priority_num = issue["priority"].as_i64().unwrap_or(0);
+        let priority = get_priority_label(priority_values, priority_num);
         let url = issue["url"].as_str().unwrap_or("");
         let issue_id = issue["id"].as_str().unwrap_or("");
         let project = issue["project"]["name"].as_str().unwrap_or("");
@@ -1564,6 +1643,7 @@ fn pull_issues(
                 &TemplateContext {
                     title,
                     status,
+                    priority,
                     issue_id,
                     identifier,
                     url,
@@ -1578,6 +1658,7 @@ fn pull_issues(
             None => default_markdown_content(
                 title,
                 status,
+                priority,
                 issue_id,
                 &labels_yaml,
                 &gh_yaml,
@@ -1676,6 +1757,7 @@ fn pull_issues(
 struct TemplateContext<'a> {
     title: &'a str,
     status: &'a str,
+    priority: &'a str,
     issue_id: &'a str,
     identifier: &'a str,
     url: &'a str,
@@ -1744,6 +1826,7 @@ fn render_template(template: &str, context: &TemplateContext<'_>) -> RenderedNot
     let rendered = template
         .replace("{{title}}", context.title)
         .replace("{{status}}", context.status)
+        .replace("{{priority}}", context.priority)
         .replace("{{linear_id}}", context.issue_id)
         .replace("{{identifier}}", context.identifier)
         .replace("{{url}}", context.url)
@@ -1807,6 +1890,7 @@ fn render_remote_issue_note(
     issue: &RemoteIssue,
     template: Option<&str>,
     now: &str,
+    priority_values: &[PriorityInfo],
 ) -> RenderedNote {
     let description_section = description_section_from_text(&issue.description);
     let labels_yaml = labels_yaml_from_names(
@@ -1829,6 +1913,7 @@ fn render_remote_issue_note(
             &TemplateContext {
                 title: &issue.title,
                 status: &issue.status,
+                priority: get_priority_label(priority_values, issue.priority),
                 issue_id: &issue.id,
                 identifier: &issue.identifier,
                 url: &issue.url,
@@ -1843,6 +1928,7 @@ fn render_remote_issue_note(
         None => default_markdown_content(
             &issue.title,
             &issue.status,
+            get_priority_label(priority_values, issue.priority),
             &issue.id,
             &labels_yaml,
             &gh_yaml,
@@ -1856,7 +1942,7 @@ fn render_remote_issue_note(
     rendered.content = override_frontmatter_value(
         &rendered.content,
         "priority",
-        YamlValue::Number(issue.priority.into()),
+        YamlValue::String(get_priority_label(priority_values, issue.priority).to_string()),
     );
     rendered
 }
@@ -1864,6 +1950,7 @@ fn render_remote_issue_note(
 fn default_markdown_content(
     title: &str,
     status: &str,
+    priority: &str,
     issue_id: &str,
     labels_yaml: &str,
     gh_yaml: &str,
@@ -1876,15 +1963,13 @@ fn default_markdown_content(
         r#"---
 title: "{title}"
 status: "{status}"
-priority: 0
-linear_id: "{issue_id}"
+priority: "{priority}"
+linear_id: "[{issue_id}]({url})"
 {labels_yaml}{gh_yaml}project: "[[{project}]]"
 ---
 
 {MANAGED_SECTION_START}
-{description_section}[Open in Linear]({url})
-
----
+{description_section}---
 *Last synced: {now}*
 {MANAGED_SECTION_END}
 
@@ -2302,13 +2387,6 @@ fn yaml_string(value: &YamlValue) -> Option<String> {
     }
 }
 
-fn yaml_i64(value: &YamlValue) -> Option<i64> {
-    match value {
-        YamlValue::Number(value) => value.as_i64(),
-        YamlValue::String(value) => value.trim().parse().ok(),
-        _ => None,
-    }
-}
 
 fn yaml_string_list(value: &YamlValue) -> Option<Vec<String>> {
     match value {
@@ -2415,6 +2493,7 @@ mod tests {
         let content = default_markdown_content(
             "Title",
             "In Progress",
+            "Urgent",
             "id-1",
             "",
             "",
@@ -2445,6 +2524,7 @@ status: "{{status}}"
             &TemplateContext {
                 title: "Title",
                 status: "Todo",
+                priority: "No priority",
                 issue_id: "id-1",
                 identifier: "ABC-1",
                 url: "https://linear.app/test",
@@ -2471,6 +2551,7 @@ status: "{{status}}"
             &TemplateContext {
                 title: "Title",
                 status: "Todo",
+                priority: "No priority",
                 issue_id: "id-1",
                 identifier: "ABC-1",
                 url: "https://linear.app/test",
@@ -2598,6 +2679,7 @@ new body
             &TemplateContext {
                 title: "Imported title",
                 status: "Todo",
+                priority: "No priority",
                 issue_id: "id-1",
                 identifier: "ABC-1",
                 url: "https://linear.app/test",
