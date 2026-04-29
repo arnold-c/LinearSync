@@ -86,6 +86,7 @@ Fetches active issues from Linear and writes them to Markdown files.
 - `-t, --team-id <TEAM_ID>`: Pull issues for a specific team
     - You should use the team identifier used in issue-titles e.g., `ACA` for `ACA-001`
 - `-o, --output-dir <PATH>`: Output directory for generated Markdown files
+- `--issue-id <ISSUE-ID>`: Pull only a single issue, such as `ACA-125`
 - `--template <PATH>`: Use a specific Markdown template file for created notes
 - `-m, --merge-all-teams`: Merge issues from all teams into a single directory
 - `-c, --confirm`: Interactively confirm team selection, merge behavior, and output path
@@ -104,6 +105,12 @@ Pull issues for a specific team:
 
 ```bash
 cargo run -- pull --team-id <TEAM_ID>
+```
+
+Pull a single issue:
+
+```bash
+cargo run -- pull --issue-id ACA-125
 ```
 
 Pull issues from all teams into one shared directory:
@@ -152,9 +159,16 @@ Instead, it prints diffs to stdout and writes a warning block into the local not
 cargo run -- push --input-dir /path/to/notes
 ```
 
+Push a single issue:
+
+```bash
+cargo run -- push --input-dir /path/to/notes --issue-id ACA-125
+```
+
 #### Options
 
 - `-i, --input-dir <PATH>`: Root directory containing issue notes
+- `--issue-id <ISSUE-ID>`: Push only a single issue, such as `ACA-125`
 - `-p, --template <PATH>`: Use a specific template when diffing the managed block
 - `--force[=<PROPERTY,...>]`: Push supported frontmatter properties to Linear
     - supported properties: `title`, `status`, `priority`, `project`, `tags`
@@ -171,6 +185,7 @@ cargo run -- push --input-dir /path/to/notes
 - Content outside the managed block is ignored by `push`
 - Managed block edits are reported, but never pushed; edit the issue in Linear instead
 - If a forced status update moves an issue to `Done`, the note is moved to the `done/` subdirectory
+- With `--issue-id`, `pull` and `push` only act on the matching issue while preserving the same location mismatch warnings and move/update guidance
 
 ## Output Structure
 

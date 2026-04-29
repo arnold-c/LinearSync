@@ -51,6 +51,9 @@ enum Commands {
         /// The UUID of the Linear Team. If omitted, pulls from all teams.
         #[arg(long)]
         team_id: Option<String>,
+        /// Pull only a single issue by identifier, such as ACA-125.
+        #[arg(long)]
+        issue_id: Option<String>,
         /// The path to your Obsidian vault directory for issues.
         /// Defaults to linear-issues/<team-name>, linear-issues/<each-team-name>,
         /// or linear-issues/all-teams when merging all teams.
@@ -80,6 +83,9 @@ enum Commands {
         /// The path to your Obsidian vault directory
         #[arg(short, long)]
         input_dir: PathBuf,
+        /// Push only a single issue by identifier, such as ACA-125.
+        #[arg(long)]
+        issue_id: Option<String>,
         /// Path to a Markdown template file used to diff managed note content.
         #[arg(short = 'p', long)]
         template: Option<PathBuf>,
@@ -234,6 +240,7 @@ fn main() {
     match &cli.command {
         Commands::Pull {
             team_id,
+            issue_id,
             output_dir,
             template,
             merge_all_teams,
@@ -249,6 +256,7 @@ fn main() {
                 &priority_values,
                 team_id.clone(),
                 output_dir.clone(),
+                issue_id.clone(),
                 template.clone(),
                 *merge_all_teams,
                 *confirm,
@@ -259,6 +267,7 @@ fn main() {
         }
         Commands::Push {
             input_dir,
+            issue_id,
             template,
             force,
             dry_run,
@@ -270,6 +279,7 @@ fn main() {
                 &api_key,
                 &priority_values,
                 input_dir.clone(),
+                issue_id.clone(),
                 template.clone(),
                 parse_force_selection(force),
                 *dry_run,
@@ -285,6 +295,7 @@ fn pull_command(
     priority_values: &[PriorityInfo],
     team_id: Option<String>,
     output_dir: Option<PathBuf>,
+    issue_id: Option<String>,
     template_path: Option<PathBuf>,
     merge_all_teams: bool,
     confirm: bool,
@@ -306,6 +317,9 @@ fn pull_command(
     };
 
     let template = load_template(template_path.as_deref());
+    let selected_issue = issue_id
+        .as_deref()
+        .map(|identifier| fetch_required_issue(client, api_key, identifier));
 
     match selection {
         PullSelection::SingleTeam { team, output_dir } => {
@@ -315,6 +329,7 @@ fn pull_command(
                 priority_values,
                 &team,
                 &output_dir,
+                selected_issue.as_ref(),
                 template.as_deref(),
                 force,
                 dry_run,
@@ -352,6 +367,7 @@ fn pull_command(
                     priority_values,
                     &team,
                     &team_output_dir,
+                    selected_issue.as_ref(),
                     template.as_deref(),
                     force,
                     dry_run,
@@ -384,16 +400,29 @@ fn push_command(
     api_key: &str,
     priority_values: &[PriorityInfo],
     input_dir: PathBuf,
+    issue_id: Option<String>,
     template_path: Option<PathBuf>,
     force_selection: ForceSelection,
     dry_run: bool,
     use_delta: bool,
 ) {
     let template = load_template(template_path.as_deref());
-    let note_paths = discover_markdown_notes(&input_dir);
+    let note_paths = match issue_id.as_deref() {
+        Some(identifier) => discover_markdown_notes_for_issue(&input_dir, identifier),
+        None => discover_markdown_notes(&input_dir),
+    };
 
     if note_paths.is_empty() {
-        println!("No markdown notes found under {}.", input_dir.display());
+        match issue_id {
+            Some(identifier) => {
+                println!(
+                    "No markdown notes found for {} under {}.",
+                    identifier,
+                    input_dir.display()
+                );
+            }
+            None => println!("No markdown notes found under {}.", input_dir.display()),
+        }
         return;
     }
 
@@ -609,8 +638,12 @@ fn push_note(
                         {
                             remote_issue = refetched_issue;
                             let refreshed_now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                            remote_note =
-                                render_remote_issue_note(&remote_issue, template, &refreshed_now, priority_values);
+                            remote_note = render_remote_issue_note(
+                                &remote_issue,
+                                template,
+                                &refreshed_now,
+                                priority_values,
+                            );
                             frontmatter_warning = push_frontmatter_diff_warning(
                                 &local_note.content,
                                 &remote_note.content,
@@ -1524,6 +1557,7 @@ fn pull_issues(
     priority_values: &[PriorityInfo],
     team: &TeamInfo,
     output_dir: &PathBuf,
+    selected_issue: Option<&RemoteIssue>,
     template: Option<&str>,
     force: bool,
     dry_run: bool,
@@ -1585,6 +1619,11 @@ fn pull_issues(
 
     for issue in issues {
         let identifier = issue["identifier"].as_str().unwrap_or("UNKNOWN");
+        if let Some(selected_issue) = selected_issue
+            && selected_issue.identifier != identifier
+        {
+            continue;
+        }
         let title = issue["title"].as_str().unwrap_or("No Title");
         let status = issue["state"]["name"].as_str().unwrap_or("Todo");
         let priority_num = issue["priority"].as_i64().unwrap_or(0);
@@ -2055,6 +2094,18 @@ fn discover_markdown_notes(root: &Path) -> Vec<PathBuf> {
     notes
 }
 
+fn discover_markdown_notes_for_issue(root: &Path, identifier: &str) -> Vec<PathBuf> {
+    discover_markdown_notes(root)
+        .into_iter()
+        .filter(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(|stem| stem.trim() == identifier)
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 fn parse_local_note(path: &Path) -> Result<LocalNote, String> {
     let content = fs::read_to_string(path)
         .map_err(|error| format!("failed to read {}: {}", path.display(), error))?;
@@ -2386,7 +2437,6 @@ fn yaml_string(value: &YamlValue) -> Option<String> {
         _ => None,
     }
 }
-
 
 fn yaml_string_list(value: &YamlValue) -> Option<Vec<String>> {
     match value {
@@ -3232,6 +3282,23 @@ fn yaml_scalar_for_diff(value: &YamlValue) -> String {
             .unwrap_or_else(|_| "<unrenderable>".to_string())
             .trim()
             .to_string(),
+    }
+}
+
+fn fetch_required_issue(client: &Client, api_key: &str, identifier: &str) -> RemoteIssue {
+    match fetch_remote_issue_by_identifier(client, api_key, identifier) {
+        Ok(Some(issue)) => issue,
+        Ok(None) => {
+            eprintln!("❌ Error: Could not find Linear issue `{}`.", identifier);
+            process::exit(1);
+        }
+        Err(error) => {
+            eprintln!(
+                "❌ Error: Failed to fetch Linear issue `{}`: {}",
+                identifier, error
+            );
+            process::exit(1);
+        }
     }
 }
 
