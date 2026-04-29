@@ -63,6 +63,9 @@ enum Commands {
         /// Overwrite the entire note instead of only updating the managed section.
         #[arg(long)]
         force: bool,
+        /// Preview note changes without writing files.
+        #[arg(long)]
+        dry_run: bool,
         /// Use YAML-style diff output instead of delta rendering.
         #[arg(long)]
         no_delta: bool,
@@ -112,6 +115,7 @@ fn main() {
             merge_all_teams,
             confirm,
             force,
+            dry_run,
             no_delta,
         } => {
             pull_command(
@@ -141,6 +145,7 @@ fn pull_command(
     merge_all_teams: bool,
     confirm: bool,
     force: bool,
+    dry_run: bool,
     use_delta: bool,
 ) {
     let teams = fetch_teams(client, api_key);
@@ -167,15 +172,23 @@ fn pull_command(
                 &output_dir,
                 template.as_deref(),
                 force,
+                dry_run,
                 use_delta,
             );
             if use_delta && !stats.delta_output.is_empty() {
                 print_delta_output(&stats.delta_output);
             }
-            println!(
-                "Imported {} notes ({} warnings).",
-                stats.imported, stats.warnings
-            );
+            if dry_run {
+                println!(
+                    "Dry run complete: would import {} notes ({} warnings).",
+                    stats.imported, stats.warnings
+                );
+            } else {
+                println!(
+                    "Imported {} notes ({} warnings).",
+                    stats.imported, stats.warnings
+                );
+            }
         }
         PullSelection::AllTeams {
             root_output_dir,
@@ -195,6 +208,7 @@ fn pull_command(
                     &team_output_dir,
                     template.as_deref(),
                     force,
+                    dry_run,
                     use_delta,
                 );
                 total.imported += stats.imported;
@@ -204,6 +218,20 @@ fn pull_command(
             if use_delta && !total.delta_output.is_empty() {
                 print_delta_output(&total.delta_output);
             }
+            if dry_run {
+                println!(
+                    "Dry run complete: would import {} notes ({} warnings).",
+                    total.imported, total.warnings
+                );
+            } else {
+                println!(
+                    "Imported {} notes ({} warnings).",
+                    total.imported, total.warnings
+                );
+            }
+        }
+    }
+}
             println!(
                 "Imported {} notes ({} warnings).",
                 total.imported, total.warnings
