@@ -399,7 +399,7 @@ Constraint for first pass:
 - keep `pull_issues()` as one function for now
 - only update imports/calls as needed to compile
 
-### `src/app/push.rs`
+### `src/app/push.rs` - DONE
 
 Move:
 - `PushStats`
@@ -408,6 +408,12 @@ Move:
 - `push_note`
 - `build_issue_update_input`
 - `resolve_force_keys`
+
+Completed:
+- created `src/app/push.rs`
+- moved the push workflow entrypoint, orchestration, and issue update planning out of `src/lib.rs`
+- added the `app::push` module and updated `src/lib.rs` to dispatch through it
+- kept `push_note()` intact as a single function for this first-pass migration
 
 Reason:
 - this is the push workflow entrypoint and orchestration layer
