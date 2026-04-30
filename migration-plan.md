@@ -479,6 +479,31 @@ Once the code is compiling and behavior is unchanged, then tackle optional impro
 7. Consider typed GraphQL response structs instead of raw `serde_json::Value` traversal.
 8. Move tests closer to the modules they exercise.
 
+## First-pass status
+
+Completed first-pass module moves:
+- `src/main.rs`
+- `src/lib.rs`
+- `src/cli/args.rs`
+- `src/cli/prompt.rs`
+- `src/linear/models.rs`
+- `src/linear/client.rs`
+- `src/notes/frontmatter.rs`
+- `src/notes/render.rs`
+- `src/notes/sections.rs`
+- `src/notes/reconcile.rs`
+- `src/notes/discovery.rs`
+- `src/notes/paths.rs`
+- `src/output/diff.rs`
+- `src/app/pull.rs`
+- `src/app/push.rs`
+
+Current status:
+- the planned first-pass module extraction is complete
+- `src/main.rs` is a thin binary entrypoint
+- `src/lib.rs` is now primarily module wiring plus bootstrap/dispatch
+- tests are passing after the migration steps
+
 ## Success criteria for the first pass
 
 The first-pass migration is successful if:

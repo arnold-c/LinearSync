@@ -1,3 +1,4 @@
+use crate::notes::sections::split_frontmatter;
 use serde_yaml::Value as YamlValue;
 use std::collections::BTreeSet;
 
@@ -78,7 +79,7 @@ pub(crate) fn normalize_project_name(value: &str) -> Option<String> {
 }
 
 pub(crate) fn override_frontmatter_value(content: &str, key: &str, value: YamlValue) -> String {
-    let Some((frontmatter, body)) = crate::split_frontmatter(content) else {
+    let Some((frontmatter, body)) = split_frontmatter(content) else {
         return content.to_string();
     };
     let Some(mut map) = parse_frontmatter_map(frontmatter) else {
@@ -125,7 +126,7 @@ pub(crate) fn collect_frontmatter_keys(
 }
 
 pub(crate) fn extract_ignored_properties(content: &str) -> Vec<String> {
-    let Some((frontmatter, _)) = crate::split_frontmatter(content) else {
+    let Some((frontmatter, _)) = split_frontmatter(content) else {
         return Vec::new();
     };
     let Some(map) = parse_frontmatter_map(frontmatter) else {

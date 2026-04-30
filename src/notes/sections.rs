@@ -1,3 +1,4 @@
+use crate::notes::reconcile::FrontmatterWarning;
 use std::path::PathBuf;
 
 pub(crate) const MANAGED_SECTION_START: &str = "<!-- linear-sync:managed:start -->";
@@ -35,7 +36,7 @@ pub(crate) struct ManagedSectionWarning {
 }
 
 pub(crate) struct PushSyncWarning {
-    pub(crate) frontmatter: Option<crate::FrontmatterWarning>,
+    pub(crate) frontmatter: Option<FrontmatterWarning>,
     pub(crate) managed: Option<ManagedSectionWarning>,
     pub(crate) notes: Vec<String>,
 }

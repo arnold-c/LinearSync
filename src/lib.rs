@@ -19,41 +19,15 @@ mod output {
     pub(crate) mod diff;
 }
 
-use crate::cli::{Cli, Commands, ForceSelection, parse_force_selection};
 use crate::app::pull::pull_command;
 use crate::app::push::push_command;
-use crate::linear::client::{
-    fetch_priority_values, fetch_project_by_name, fetch_remote_issue_by_id,
-    fetch_remote_issue_for_note, resolve_label, resolve_state, update_linear_issue,
-};
-use crate::linear::models::{PriorityInfo, RemoteIssue, get_priority_number};
-use crate::notes::discovery::{
-    LocalNote, discover_markdown_notes, discover_markdown_notes_for_issue, parse_local_note,
-};
-use crate::notes::frontmatter::{normalize_project_name, yaml_string, yaml_string_list};
-use crate::notes::paths::{final_note_path_after_push, status_slug, write_note_to_path};
-use crate::notes::reconcile::{
-    FrontmatterWarning, insert_or_remove_conflict_section, managed_section_warning,
-    push_frontmatter_diff_warning,
-};
-use crate::notes::render::{
-    initialize_installed_template_path, load_template, render_remote_issue_note,
-};
-use crate::notes::sections::{
-    PushSyncWarning, insert_or_remove_note_location_warning,
-    insert_or_remove_push_sync_section, split_frontmatter,
-};
-use crate::output::diff::{ANSI_BLUE, ANSI_RED, ANSI_RESET, ANSI_YELLOW, print_push_diff};
-use chrono::Utc;
+use crate::cli::{Cli, Commands, parse_force_selection};
+use crate::linear::client::fetch_priority_values;
+use crate::notes::render::initialize_installed_template_path;
 use clap::Parser;
 use dotenvy::dotenv;
 use reqwest::blocking::Client;
-use serde_json::{Map as JsonMap, Value, json};
-use serde_yaml::Value as YamlValue;
-use std::collections::BTreeSet;
 use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
 use std::process;
 
 pub fn run() {
@@ -138,12 +112,16 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::notes::reconcile::{
-        frontmatter_conflict_warning, merge_frontmatter, merge_with_existing_note,
+        frontmatter_conflict_warning, managed_section_warning, merge_frontmatter,
+        merge_with_existing_note, push_frontmatter_diff_warning,
     };
     use crate::notes::render::{TemplateContext, default_markdown_content, render_template};
-    use crate::notes::sections::{MANAGED_SECTION_END, MANAGED_SECTION_START};
+    use crate::notes::sections::{
+        MANAGED_SECTION_END, MANAGED_SECTION_START, insert_or_remove_note_location_warning,
+    };
+    use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn default_content_keeps_frontmatter_at_top() {
