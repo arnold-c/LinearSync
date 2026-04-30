@@ -3,6 +3,7 @@ mod linear {
     pub(crate) mod models;
 }
 mod notes {
+    pub(crate) mod discovery;
     pub(crate) mod frontmatter;
     pub(crate) mod paths;
     pub(crate) mod reconcile;
@@ -18,9 +19,12 @@ use crate::linear::models::{
     LabelInfo, PriorityInfo, ProjectInfo, RemoteIssue, TeamInfo, WorkflowState,
     get_priority_label, get_priority_number,
 };
+use crate::notes::discovery::{
+    LocalNote, discover_markdown_notes, discover_markdown_notes_for_issue,
+    find_issue_note_in_other_status, include_done_issue, parse_local_note,
+};
 use crate::notes::frontmatter::{
-    extract_ignored_properties, extract_linear_id_from_frontmatter, normalize_frontmatter_key,
-    normalize_project_name, parse_frontmatter_map, yaml_string, yaml_string_list,
+    normalize_frontmatter_key, normalize_project_name, yaml_string, yaml_string_list,
 };
 use crate::notes::paths::{
     default_output_dir_for_team, default_output_root_for_all_teams, file_path_for_issue,
@@ -58,16 +62,6 @@ use std::process;
 
 const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
 const ALL_TEAMS_OPTION: &str = "ALL TEAMS";
-
-
-struct LocalNote {
-    path: PathBuf,
-    identifier: String,
-    content: String,
-    frontmatter: serde_yaml::Mapping,
-    ignored_properties: Vec<String>,
-    fallback_linear_id: Option<String>,
-}
 
 #[derive(Default)]
 struct PushStats {
@@ -1681,123 +1675,6 @@ struct IssueUpdatePlan {
     updated_keys: Vec<String>,
     notes: Vec<String>,
     will_move_to_done: bool,
-}
-
-fn discover_markdown_notes(root: &Path, include_done: bool) -> Vec<PathBuf> {
-    let mut notes = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-
-    while let Some(path) = stack.pop() {
-        let entries = match fs::read_dir(&path) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
-            if entry_path.is_dir() {
-                if !include_done && is_done_directory(&entry_path) {
-                    continue;
-                }
-                stack.push(entry_path);
-            } else if entry_path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .map(|extension| extension.eq_ignore_ascii_case("md"))
-                .unwrap_or(false)
-            {
-                notes.push(entry_path);
-            }
-        }
-    }
-
-    notes.sort();
-    notes
-}
-
-fn discover_markdown_notes_for_issue(
-    root: &Path,
-    identifier: &str,
-    include_done: bool,
-) -> Vec<PathBuf> {
-    discover_markdown_notes(root, include_done)
-        .into_iter()
-        .filter(|path| {
-            path.file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(|stem| stem.trim() == identifier)
-                .unwrap_or(false)
-        })
-        .collect()
-}
-
-fn parse_local_note(path: &Path) -> Result<LocalNote, String> {
-    let content = fs::read_to_string(path)
-        .map_err(|error| format!("failed to read {}: {}", path.display(), error))?;
-    let (frontmatter, _) = split_frontmatter(&content)
-        .ok_or_else(|| "note is missing YAML frontmatter".to_string())?;
-    let frontmatter = parse_frontmatter_map(frontmatter)
-        .ok_or_else(|| "note frontmatter is not valid YAML".to_string())?;
-
-    let identifier = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(str::trim)
-        .filter(|stem| !stem.is_empty())
-        .ok_or_else(|| "note file name does not contain an issue identifier".to_string())?
-        .to_string();
-
-    let ignored_properties = extract_ignored_properties(&content);
-    let fallback_linear_id = extract_linear_id_from_frontmatter(&frontmatter);
-
-    Ok(LocalNote {
-        path: path.to_path_buf(),
-        identifier,
-        content,
-        frontmatter,
-        ignored_properties,
-        fallback_linear_id,
-    })
-}
-
-
-fn is_done_directory(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.eq_ignore_ascii_case("done"))
-        .unwrap_or(false)
-}
-
-fn include_done_issue(
-    include_done: bool,
-    status: &str,
-    desired_file_path: &Path,
-    existing_file_path: &Path,
-) -> bool {
-    if status_slug(status) != "done" {
-        return true;
-    }
-
-    include_done || existing_file_path != desired_file_path
-}
-
-fn find_issue_note_in_other_status(output_dir: &Path, identifier: &str) -> Option<PathBuf> {
-    let target_name = format!("{}.md", identifier);
-    let entries = fs::read_dir(output_dir).ok()?;
-
-    for entry in entries.flatten() {
-        let entry_path = entry.path();
-        if !entry_path.is_dir() {
-            continue;
-        }
-
-        let candidate = entry_path.join(&target_name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-
-    None
 }
 
 

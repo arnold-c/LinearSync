@@ -287,7 +287,7 @@ Note for first pass:
 - keep the existing algorithms intact
 - do not try to deduplicate conflict/diff logic yet
 
-### `src/notes/discovery.rs`
+### `src/notes/discovery.rs` - DONE
 
 Move:
 - `LocalNote`
@@ -297,6 +297,12 @@ Move:
 - `is_done_directory`
 - `include_done_issue`
 - `find_issue_note_in_other_status`
+
+Completed:
+- created `src/notes/discovery.rs`
+- moved local note discovery, parsing, and done-folder helpers out of `src/lib.rs`
+- added the `notes::discovery` module and updated imports in `src/lib.rs`
+- kept the move conservative by reusing frontmatter, section, and path helpers from existing modules
 
 Reason:
 - local note discovery and parsing belong together
