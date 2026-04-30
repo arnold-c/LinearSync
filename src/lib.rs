@@ -1,4 +1,5 @@
 mod cli;
+mod error;
 mod linear {
     pub(crate) mod client;
     pub(crate) mod models;
@@ -22,6 +23,7 @@ mod output {
 use crate::app::pull::pull_command;
 use crate::app::push::push_command;
 use crate::cli::{Cli, Commands, parse_force_selection};
+use crate::error::AppError;
 use crate::linear::client::fetch_priority_values;
 use crate::notes::render::initialize_installed_template_path;
 use clap::Parser;
@@ -31,25 +33,23 @@ use std::env;
 use std::process;
 
 pub fn run() {
+    if let Err(error) = try_run() {
+        eprintln!("❌ Error: {error}");
+        process::exit(1);
+    }
+}
+
+fn try_run() -> Result<(), AppError> {
     dotenv().ok();
     initialize_installed_template_path();
 
     let cli = Cli::parse();
 
-    let api_key = match env::var("LINEAR_API_KEY") {
-        Ok(key) => key,
-        Err(_) => {
-            eprintln!("❌ Error: LINEAR_API_KEY is not set.");
-            eprintln!("Please provide your Linear API key by doing one of the following:");
-            eprintln!(
-                "  1. Create a .env file in the directory where you run this command containing:"
-            );
-            eprintln!("     LINEAR_API_KEY=lin_api_your_key_here");
-            eprintln!("  2. Export it directly in your shell:");
-            eprintln!("     export LINEAR_API_KEY=lin_api_your_key_here\n");
-            process::exit(1);
-        }
-    };
+    let api_key = env::var("LINEAR_API_KEY").map_err(|_| {
+        AppError::message(
+            "LINEAR_API_KEY is not set.\nPlease provide your Linear API key by doing one of the following:\n  1. Create a .env file in the directory where you run this command containing:\n     LINEAR_API_KEY=lin_api_your_key_here\n  2. Export it directly in your shell:\n     export LINEAR_API_KEY=lin_api_your_key_here\n",
+        )
+    })?;
 
     let client = Client::new();
 
@@ -66,7 +66,7 @@ pub fn run() {
             dry_run,
             no_delta,
         } => {
-            let priority_values = fetch_priority_values(&client, &api_key);
+            let priority_values = fetch_priority_values(&client, &api_key)?;
             pull_command(
                 &client,
                 &api_key,
@@ -81,7 +81,7 @@ pub fn run() {
                 *include_done,
                 *dry_run,
                 !*no_delta,
-            );
+            )?;
         }
         Commands::Push {
             input_dir,
@@ -92,7 +92,7 @@ pub fn run() {
             dry_run,
             no_delta,
         } => {
-            let priority_values = fetch_priority_values(&client, &api_key);
+            let priority_values = fetch_priority_values(&client, &api_key)?;
             push_command(
                 &client,
                 &api_key,
@@ -104,9 +104,11 @@ pub fn run() {
                 *include_done,
                 *dry_run,
                 !*no_delta,
-            );
+            )?;
         }
     }
+
+    Ok(())
 }
 
 

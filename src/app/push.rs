@@ -1,4 +1,5 @@
 use crate::cli::ForceSelection;
+use crate::error::AppError;
 use crate::linear::client::{
     fetch_project_by_name, fetch_remote_issue_by_id, fetch_remote_issue_for_note,
     resolve_label, resolve_state, update_linear_issue,
@@ -54,8 +55,8 @@ pub(crate) fn push_command(
     include_done: bool,
     dry_run: bool,
     use_delta: bool,
-) {
-    let template = load_template(template_path.as_deref());
+) -> Result<(), AppError> {
+    let template = load_template(template_path.as_deref())?;
     let note_paths = match issue_id.as_deref() {
         Some(identifier) => discover_markdown_notes_for_issue(&input_dir, identifier, include_done),
         None => discover_markdown_notes(&input_dir, include_done),
@@ -72,7 +73,7 @@ pub(crate) fn push_command(
             }
             None => println!("No markdown notes found under {}.", input_dir.display()),
         }
-        return;
+        return Ok(());
     }
 
     let mut stats = PushStats::default();
@@ -105,6 +106,8 @@ pub(crate) fn push_command(
             stats.scanned, stats.updated, stats.moved, stats.warnings, stats.errors
         );
     }
+
+    Ok(())
 }
 
 pub(crate) fn push_note(

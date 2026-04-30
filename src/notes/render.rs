@@ -1,3 +1,4 @@
+use crate::error::AppError;
 use crate::linear::models::{PriorityInfo, RemoteIssue, get_priority_label};
 use crate::notes::frontmatter::{extract_ignored_properties, override_frontmatter_value};
 use crate::notes::sections::{MANAGED_SECTION_END, MANAGED_SECTION_START, ensure_managed_section};
@@ -5,7 +6,6 @@ use serde_yaml::Value as YamlValue;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process;
 use std::sync::OnceLock;
 
 pub(crate) const DEFAULT_TEMPLATE_PATH: &str = "template.md";
@@ -32,21 +32,21 @@ pub(crate) struct RenderedNote {
     pub(crate) ignored_properties: Vec<String>,
 }
 
-pub(crate) fn load_template(template_path: Option<&Path>) -> Option<String> {
+pub(crate) fn load_template(template_path: Option<&Path>) -> Result<Option<String>, AppError> {
     let path = template_path
         .map(Path::to_path_buf)
         .or_else(default_template_path_if_present);
 
     path.map(|path| {
-        fs::read_to_string(&path).unwrap_or_else(|error| {
-            eprintln!(
-                "❌ Error: Failed to read template file '{}': {}",
+        fs::read_to_string(&path).map_err(|error| {
+            AppError::message(format!(
+                "Failed to read template file '{}': {}",
                 path.display(),
                 error
-            );
-            process::exit(1);
+            ))
         })
     })
+    .transpose()
 }
 
 pub(crate) fn default_template_path_if_present() -> Option<PathBuf> {

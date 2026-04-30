@@ -1,3 +1,4 @@
+use crate::error::AppError;
 use crate::linear::models::{
     LabelInfo, PriorityInfo, ProjectInfo, RemoteIssue, TeamInfo, WorkflowState,
 };
@@ -5,11 +6,10 @@ use crate::notes::discovery::LocalNote;
 use crate::notes::paths::status_slug;
 use reqwest::blocking::Client;
 use serde_json::{Map as JsonMap, Value, json};
-use std::process;
 
 pub(crate) const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
 
-pub(crate) fn fetch_teams(client: &Client, api_key: &str) -> Vec<TeamInfo> {
+pub(crate) fn fetch_teams(client: &Client, api_key: &str) -> Result<Vec<TeamInfo>, AppError> {
     let query = r#"
     query GetTeams {
       teams {
@@ -21,15 +21,12 @@ pub(crate) fn fetch_teams(client: &Client, api_key: &str) -> Vec<TeamInfo> {
     }
     "#;
 
-    let response = graphql_request(client, api_key, query, json!({}));
+    let response = graphql_request(client, api_key, query, json!({}))?;
     let teams = response["data"]["teams"]["nodes"]
         .as_array()
-        .unwrap_or_else(|| {
-            eprintln!("❌ Error: Could not retrieve team list from Linear.");
-            process::exit(1);
-        });
+        .ok_or_else(|| AppError::message("Could not retrieve team list from Linear."))?;
 
-    teams
+    Ok(teams
         .iter()
         .filter_map(|team| {
             Some(TeamInfo {
@@ -37,10 +34,13 @@ pub(crate) fn fetch_teams(client: &Client, api_key: &str) -> Vec<TeamInfo> {
                 name: team["name"].as_str()?.to_string(),
             })
         })
-        .collect()
+        .collect())
 }
 
-pub(crate) fn fetch_priority_values(client: &Client, api_key: &str) -> Vec<PriorityInfo> {
+pub(crate) fn fetch_priority_values(
+    client: &Client,
+    api_key: &str,
+) -> Result<Vec<PriorityInfo>, AppError> {
     let query = r#"
     query GetPriorityValues {
       issuePriorityValues {
@@ -50,15 +50,12 @@ pub(crate) fn fetch_priority_values(client: &Client, api_key: &str) -> Vec<Prior
     }
     "#;
 
-    let response = graphql_request(client, api_key, query, json!({}));
+    let response = graphql_request(client, api_key, query, json!({}))?;
     let values = response["data"]["issuePriorityValues"]
         .as_array()
-        .unwrap_or_else(|| {
-            eprintln!("❌ Error: Could not retrieve issue priority values from Linear.");
-            process::exit(1);
-        });
+        .ok_or_else(|| AppError::message("Could not retrieve issue priority values from Linear."))?;
 
-    values
+    Ok(values
         .iter()
         .filter_map(|val| {
             Some(PriorityInfo {
@@ -66,7 +63,7 @@ pub(crate) fn fetch_priority_values(client: &Client, api_key: &str) -> Vec<Prior
                 label: val["label"].as_str()?.to_string(),
             })
         })
-        .collect()
+        .collect())
 }
 
 pub(crate) fn fetch_remote_issue_for_note(
@@ -420,38 +417,42 @@ pub(crate) fn graphql_request_result(
     Ok(value)
 }
 
-pub(crate) fn graphql_request(client: &Client, api_key: &str, query: &str, variables: Value) -> Value {
+pub(crate) fn graphql_request(
+    client: &Client,
+    api_key: &str,
+    query: &str,
+    variables: Value,
+) -> Result<Value, AppError> {
     let response = client
         .post(LINEAR_API_URL)
         .header("Authorization", api_key)
         .header("Content-Type", "application/json")
         .json(&json!({ "query": query, "variables": variables }))
         .send()
-        .expect("Failed to send request to Linear API");
+        .map_err(|error| AppError::message(format!("Failed to send request to Linear API: {error}")))?;
 
     if response.status().is_success() {
-        response.json().expect("Failed to parse JSON")
+        response
+            .json()
+            .map_err(|error| AppError::message(format!("Failed to parse JSON: {error}")))
     } else {
-        eprintln!("❌ API Request Failed: {:?}", response.status());
-        eprintln!("Response body: {:?}", response.text().unwrap_or_default());
-        process::exit(1);
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        Err(AppError::message(format!("API request failed: {status}\nResponse body: {body}")))
     }
 }
 
-pub(crate) fn fetch_required_issue(client: &Client, api_key: &str, identifier: &str) -> RemoteIssue {
+pub(crate) fn fetch_required_issue(
+    client: &Client,
+    api_key: &str,
+    identifier: &str,
+) -> Result<RemoteIssue, AppError> {
     match fetch_remote_issue_by_identifier(client, api_key, identifier) {
-        Ok(Some(issue)) => issue,
-        Ok(None) => {
-            eprintln!("❌ Error: Could not find Linear issue `{}`.", identifier);
-            process::exit(1);
-        }
-        Err(error) => {
-            eprintln!(
-                "❌ Error: Failed to fetch Linear issue `{}`: {}",
-                identifier, error
-            );
-            process::exit(1);
-        }
+        Ok(Some(issue)) => Ok(issue),
+        Ok(None) => Err(AppError::message(format!("Could not find Linear issue `{identifier}`."))),
+        Err(error) => Err(AppError::message(format!(
+            "Failed to fetch Linear issue `{identifier}`: {error}"
+        ))),
     }
 }
 

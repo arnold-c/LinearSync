@@ -1,4 +1,5 @@
 use crate::cli::{PullSelection, prompt_for_pull_selection, resolve_pull_selection};
+use crate::error::AppError;
 use crate::linear::client::{fetch_required_issue, fetch_teams, graphql_request};
 use crate::linear::models::{PriorityInfo, RemoteIssue, TeamInfo, get_priority_label};
 use crate::notes::discovery::{find_issue_note_in_other_status, include_done_issue};
@@ -12,7 +13,6 @@ use reqwest::blocking::Client;
 use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
-use std::process;
 
 #[derive(Default)]
 pub(crate) struct PullStats {
@@ -35,12 +35,11 @@ pub(crate) fn pull_command(
     include_done: bool,
     dry_run: bool,
     use_delta: bool,
-) {
-    let teams = fetch_teams(client, api_key);
+) -> Result<(), AppError> {
+    let teams = fetch_teams(client, api_key)?;
 
     if teams.is_empty() {
-        eprintln!("❌ Error: No Linear teams were found for this account.");
-        process::exit(1);
+        return Err(AppError::message("No Linear teams were found for this account."));
     }
 
     let selection = if confirm {
@@ -49,10 +48,11 @@ pub(crate) fn pull_command(
         resolve_pull_selection(&teams, team_id, output_dir, merge_all_teams)
     };
 
-    let template = load_template(template_path.as_deref());
-    let selected_issue = issue_id
-        .as_deref()
-        .map(|identifier| fetch_required_issue(client, api_key, identifier));
+    let template = load_template(template_path.as_deref())?;
+    let selected_issue = match issue_id.as_deref() {
+        Some(identifier) => Some(fetch_required_issue(client, api_key, identifier)?),
+        None => None,
+    };
 
     match selection {
         PullSelection::SingleTeam { team, output_dir } => {
@@ -68,7 +68,7 @@ pub(crate) fn pull_command(
                 include_done,
                 dry_run,
                 use_delta,
-            );
+            )?;
             if use_delta && !stats.delta_output.is_empty() {
                 print_delta_output(&stats.delta_output);
             }
@@ -107,7 +107,7 @@ pub(crate) fn pull_command(
                     include_done,
                     dry_run,
                     use_delta,
-                );
+                )?;
                 total.imported += stats.imported;
                 total.warnings += stats.warnings;
                 total.delta_output.push_str(&stats.delta_output);
@@ -128,6 +128,8 @@ pub(crate) fn pull_command(
             }
         }
     }
+
+    Ok(())
 }
 
 pub(crate) fn pull_issues(
@@ -142,7 +144,7 @@ pub(crate) fn pull_issues(
     include_done: bool,
     dry_run: bool,
     use_delta: bool,
-) -> PullStats {
+) -> Result<PullStats, AppError> {
     let query = r#"
     query GetTeamIssues($teamId: String!) {
       team(id: $teamId) {
@@ -177,21 +179,19 @@ pub(crate) fn pull_issues(
     }
     "#;
 
-    let response = graphql_request(client, api_key, query, json!({ "teamId": team.id }));
+    let response = graphql_request(client, api_key, query, json!({ "teamId": team.id }))?;
 
-    let issues = match response["data"]["team"]["issues"]["nodes"].as_array() {
-        Some(arr) => arr,
-        None => {
-            eprintln!(
-                "❌ Error: Could not find issues for team '{}' ({}).",
+    let issues = response["data"]["team"]["issues"]["nodes"]
+        .as_array()
+        .ok_or_else(|| {
+            AppError::message(format!(
+                "Could not find issues for team '{}' ({}).",
                 team.name, team.id
-            );
-            process::exit(1);
-        }
-    };
+            ))
+        })?;
 
     if !dry_run && !output_dir.exists() {
-        fs::create_dir_all(output_dir).expect("Failed to create output directory");
+        fs::create_dir_all(output_dir)?;
     }
 
     let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -378,5 +378,5 @@ pub(crate) fn pull_issues(
         }
     }
 
-    stats
+    Ok(stats)
 }
