@@ -378,13 +378,19 @@ Completed:
 Reason:
 - terminal diff rendering is an output concern
 
-### `src/app/pull.rs`
+### `src/app/pull.rs` - DONE
 
 Move:
 - `PullStats`
 - `pull_command`
 - `pull_issues`
 - `ALL_TEAMS_OPTION`
+
+Completed:
+- created `src/app/pull.rs`
+- moved the pull workflow entrypoint and orchestration functions out of `src/lib.rs`
+- added the `app::pull` module and updated `src/lib.rs` to dispatch through it
+- kept `pull_issues()` intact as a single function for this first-pass migration
 
 Reason:
 - this is the pull workflow entrypoint and orchestration layer
