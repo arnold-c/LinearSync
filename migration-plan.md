@@ -152,7 +152,7 @@ Completed:
 Reason:
 - these are domain types used across pull, push, and rendering
 
-### `src/linear/client.rs`
+### `src/linear/client.rs` - DONE
 
 Move:
 - `fetch_teams`
@@ -173,6 +173,12 @@ Move:
 - `resolve_state`
 - `resolve_label`
 - `LINEAR_API_URL`
+
+Completed:
+- created `src/linear/client.rs`
+- moved Linear API transport, issue lookup, response parsing, and state/label resolution helpers out of `src/lib.rs`
+- added the `linear::client` module and updated imports in `src/lib.rs`
+- kept the first pass conservative by preserving the existing function-style API and process-exit behavior
 
 Reason:
 - keeps all Linear transport and parsing in one place
