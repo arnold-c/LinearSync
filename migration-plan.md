@@ -64,7 +64,7 @@ The guiding rule for the first pass is:
 
 > Move cohesive groups of code into modules, keep function signatures mostly intact, and avoid redesigning internals unless necessary for compilation.
 
-### 1. `src/main.rs`
+### 1. `src/main.rs` - DONE
 
 Keep only:
 - dotenv/bootstrap
