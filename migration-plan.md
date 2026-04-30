@@ -258,7 +258,7 @@ Completed:
 Reason:
 - these are document-section mechanics
 
-### `src/notes/reconcile.rs`
+### `src/notes/reconcile.rs` - DONE
 
 Move:
 - `MergeResult`
@@ -272,6 +272,12 @@ Move:
 - `render_text_diff`
 - `managed_section_warning`
 - `push_frontmatter_diff_warning`
+
+Completed:
+- created `src/notes/reconcile.rs`
+- moved note merge, conflict warning, managed-section diff, and push frontmatter diff helpers out of `src/lib.rs`
+- added the `notes::reconcile` module and updated imports in `src/lib.rs`
+- kept tests compiling by importing reconcile-only helpers directly in the test module
 
 Reason:
 - this is the local/remote note reconciliation layer
