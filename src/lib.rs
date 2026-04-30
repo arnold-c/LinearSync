@@ -4,6 +4,7 @@ mod linear {
 }
 mod notes {
     pub(crate) mod frontmatter;
+    pub(crate) mod paths;
     pub(crate) mod sections;
 }
 
@@ -18,13 +19,19 @@ use crate::notes::frontmatter::{
     parse_frontmatter_map, render_modified_yaml_value_diff, render_yaml_value_diff,
     yaml_string, yaml_string_list,
 };
+use crate::notes::paths::{
+    default_output_dir_for_team, default_output_root_for_all_teams, file_path_for_issue,
+    final_note_path_after_push, note_location_warning, slugify_team_name, status_slug,
+    write_note_to_path,
+};
 use crate::notes::sections::{
     CONFLICT_SECTION_END, CONFLICT_SECTION_START, MANAGED_SECTION_END,
     MANAGED_SECTION_START, NOTE_LOCATION_SECTION_END, NOTE_LOCATION_SECTION_START,
-    NoteLocationWarning, PUSH_SYNC_SECTION_END, PUSH_SYNC_SECTION_START, PushSyncWarning,
-    ManagedSectionWarning, ensure_managed_section, extract_managed_section,
-    extract_managed_section_body, insert_or_remove_note_location_warning,
-    insert_or_remove_push_sync_section, remove_section, split_frontmatter,
+    ManagedSectionWarning, PUSH_SYNC_SECTION_END,
+    PUSH_SYNC_SECTION_START, PushSyncWarning, ensure_managed_section,
+    extract_managed_section, extract_managed_section_body,
+    insert_or_remove_note_location_warning, insert_or_remove_push_sync_section,
+    remove_section, split_frontmatter,
 };
 use chrono::Utc;
 use clap::Parser;
@@ -47,7 +54,6 @@ const ANSI_BLUE: &str = "\x1b[34m";
 const ANSI_RESET: &str = "\x1b[0m";
 
 const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
-const DEFAULT_OUTPUT_ROOT: &str = "linear-issues";
 const DEFAULT_TEMPLATE_PATH: &str = "template.md";
 const ALL_TEAMS_OPTION: &str = "ALL TEAMS";
 
@@ -1985,10 +1991,6 @@ fn parse_local_note(path: &Path) -> Result<LocalNote, String> {
 }
 
 
-fn status_slug(status: &str) -> String {
-    status.trim().to_lowercase().replace(' ', "-")
-}
-
 fn is_done_directory(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -2026,23 +2028,6 @@ fn find_issue_note_in_other_status(output_dir: &Path, identifier: &str) -> Optio
     }
 
     None
-}
-
-fn note_location_warning(
-    current_path: &Path,
-    desired_path: &Path,
-    status: &str,
-    identifier: &str,
-) -> Option<NoteLocationWarning> {
-    if current_path == desired_path {
-        None
-    } else {
-        Some(NoteLocationWarning {
-            desired_path: desired_path.to_path_buf(),
-            status: status.to_string(),
-            identifier: identifier.to_string(),
-        })
-    }
 }
 
 
@@ -2149,45 +2134,6 @@ fn resolve_force_keys(
     }
 }
 
-
-fn final_note_path_after_push(current_path: &Path, status: &str) -> PathBuf {
-    if status_slug(status) != "done" {
-        return current_path.to_path_buf();
-    }
-
-    let Some(status_dir) = current_path.parent() else {
-        return current_path.to_path_buf();
-    };
-    let Some(root_dir) = status_dir.parent() else {
-        return current_path.to_path_buf();
-    };
-    let Some(file_name) = current_path.file_name() else {
-        return current_path.to_path_buf();
-    };
-
-    root_dir.join("done").join(file_name)
-}
-
-fn write_note_to_path(original_path: &Path, final_path: &Path, content: &str) -> io::Result<()> {
-    if original_path != final_path && final_path.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("target note already exists at {}", final_path.display()),
-        ));
-    }
-
-    if let Some(parent) = final_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    fs::write(final_path, content)?;
-
-    if original_path != final_path && original_path.exists() {
-        fs::remove_file(original_path)?;
-    }
-
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
@@ -2489,7 +2435,7 @@ new body
             "<!-- linear-sync:managed:end -->\n",
         );
 
-        let warning = NoteLocationWarning {
+        let warning = crate::notes::sections::NoteLocationWarning {
             desired_path: PathBuf::from("linear-issues/done/ABC-1.md"),
             status: "Done".to_string(),
             identifier: "ABC-1".to_string(),
@@ -2835,12 +2781,6 @@ fn fetch_required_issue(client: &Client, api_key: &str, identifier: &str) -> Rem
     }
 }
 
-fn file_path_for_issue(output_dir: &Path, status: &str, identifier: &str) -> PathBuf {
-    output_dir
-        .join(status_slug(status))
-        .join(format!("{}.md", identifier))
-}
-
 fn graphql_request(client: &Client, api_key: &str, query: &str, variables: Value) -> Value {
     let response = client
         .post(LINEAR_API_URL)
@@ -2859,43 +2799,3 @@ fn graphql_request(client: &Client, api_key: &str, query: &str, variables: Value
     }
 }
 
-fn default_output_root() -> PathBuf {
-    PathBuf::from(DEFAULT_OUTPUT_ROOT)
-}
-
-fn default_output_root_for_all_teams(merge_all_teams: bool) -> PathBuf {
-    if merge_all_teams {
-        default_output_root().join("all-teams")
-    } else {
-        default_output_root()
-    }
-}
-
-fn default_output_dir_for_team(team_name: &str) -> PathBuf {
-    default_output_root().join(slugify_team_name(team_name))
-}
-
-fn slugify_team_name(team_name: &str) -> String {
-    let slug = team_name
-        .trim()
-        .to_lowercase()
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-        .collect::<String>();
-
-    let mut compacted = String::new();
-    let mut last_was_dash = false;
-    for ch in slug.chars() {
-        if ch == '-' {
-            if !last_was_dash {
-                compacted.push(ch);
-            }
-            last_was_dash = true;
-        } else {
-            compacted.push(ch);
-            last_was_dash = false;
-        }
-    }
-
-    compacted.trim_matches('-').to_string()
-}

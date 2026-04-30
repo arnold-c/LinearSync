@@ -289,7 +289,7 @@ Move:
 Reason:
 - local note discovery and parsing belong together
 
-### `src/notes/paths.rs`
+### `src/notes/paths.rs` - DONE
 
 Move:
 - `status_slug`
@@ -302,6 +302,12 @@ Move:
 - `default_output_dir_for_team`
 - `slugify_team_name`
 - `DEFAULT_OUTPUT_ROOT`
+
+Completed:
+- created `src/notes/paths.rs`
+- moved note path, status-folder, and output-root helpers out of `src/lib.rs`
+- added the `notes::paths` module and updated imports in `src/lib.rs`
+- kept the move conservative by reusing `NoteLocationWarning` from `notes::sections`
 
 Reason:
 - path and status-folder rules are cohesive
