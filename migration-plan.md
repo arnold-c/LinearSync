@@ -171,7 +171,7 @@ Note for first pass:
 - do **not** require introducing a `LinearClient` struct yet
 - do **not** normalize all error handling yet unless needed for module boundaries
 
-### `src/notes/frontmatter.rs`
+### `src/notes/frontmatter.rs` - DONE
 
 Move:
 - `extract_linear_id_from_frontmatter`
@@ -186,6 +186,12 @@ Move:
 - `render_yaml_value_diff`
 - `render_modified_yaml_value_diff`
 - `yaml_scalar_for_diff`
+
+Completed:
+- created `src/notes/frontmatter.rs`
+- moved the YAML/frontmatter parsing, normalization, and diff helpers out of `src/lib.rs`
+- added the `notes::frontmatter` module and updated imports in `src/lib.rs`
+- kept the move low-risk by continuing to call `split_frontmatter()` from `src/lib.rs`
 
 Reason:
 - cohesive YAML/frontmatter utilities
