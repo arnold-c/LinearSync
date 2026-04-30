@@ -119,7 +119,7 @@ Reason:
 - these are CLI interaction concerns
 - this fits better under `cli` than `output`
 
-### `src/linear/models.rs`
+### `src/linear/models.rs` - DONE
 
 Move:
 - `TeamInfo`
@@ -130,6 +130,12 @@ Move:
 - `RemoteIssue`
 - `get_priority_label`
 - `get_priority_number`
+
+Completed:
+- created `src/linear/models.rs`
+- moved the Linear domain structs and priority helper functions out of `src/lib.rs`
+- added the `linear::models` module and updated imports in `src/lib.rs`
+- kept behavior unchanged and visibility conservative with `pub(crate)`
 
 Reason:
 - these are domain types used across pull, push, and rendering

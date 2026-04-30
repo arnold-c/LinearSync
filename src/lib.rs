@@ -1,6 +1,13 @@
 mod cli;
+mod linear {
+    pub(crate) mod models;
+}
 
 use crate::cli::{Cli, Commands, ForceSelection, parse_force_selection};
+use crate::linear::models::{
+    LabelInfo, PriorityInfo, ProjectInfo, RemoteIssue, TeamInfo, WorkflowState,
+    get_priority_label, get_priority_number,
+};
 use chrono::Utc;
 use clap::Parser;
 use dotenvy::dotenv;
@@ -36,52 +43,6 @@ const ALL_TEAMS_OPTION: &str = "ALL TEAMS";
 
 static INSTALLED_TEMPLATE_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-#[derive(Clone, Debug)]
-struct TeamInfo {
-    id: String,
-    name: String,
-}
-
-#[derive(Clone, Debug)]
-struct PriorityInfo {
-    priority: i64,
-    label: String,
-}
-
-#[derive(Clone, Debug)]
-struct WorkflowState {
-    id: String,
-    name: String,
-}
-
-#[derive(Clone, Debug)]
-struct LabelInfo {
-    id: String,
-    name: String,
-}
-
-#[derive(Clone, Debug)]
-struct ProjectInfo {
-    id: String,
-    name: String,
-}
-
-#[derive(Clone, Debug)]
-struct RemoteIssue {
-    id: String,
-    identifier: String,
-    title: String,
-    url: String,
-    description: String,
-    status: String,
-    priority: i64,
-    team: TeamInfo,
-    states: Vec<WorkflowState>,
-    labels: Vec<LabelInfo>,
-    available_labels: Vec<LabelInfo>,
-    project: Option<ProjectInfo>,
-    attachments: Vec<String>,
-}
 
 struct LocalNote {
     path: PathBuf,
@@ -101,21 +62,6 @@ struct PushStats {
     moved: usize,
 }
 
-fn get_priority_label<'a>(priority_values: &'a [PriorityInfo], priority: i64) -> &'a str {
-    priority_values
-        .iter()
-        .find(|v| v.priority == priority)
-        .map(|v| v.label.as_str())
-        .unwrap_or("No priority")
-}
-
-fn get_priority_number(priority_values: &[PriorityInfo], label: &str) -> Option<i64> {
-    priority_values
-        .iter()
-        .find(|v| v.label.eq_ignore_ascii_case(label))
-        .map(|v| v.priority)
-        .or_else(|| label.parse::<i64>().ok())
-}
 
 pub fn run() {
     dotenv().ok();
