@@ -218,7 +218,7 @@ Move:
 Reason:
 - template loading and note rendering belong together
 
-### `src/notes/sections.rs`
+### `src/notes/sections.rs` - DONE
 
 Move:
 - `ensure_managed_section`
@@ -242,6 +242,12 @@ Move:
   - `PUSH_SYNC_SECTION_END`
   - `NOTE_LOCATION_SECTION_START`
   - `NOTE_LOCATION_SECTION_END`
+
+Completed:
+- created `src/notes/sections.rs`
+- moved managed-section markers, section warning structs, and section insertion/extraction helpers out of `src/lib.rs`
+- added the `notes::sections` module and updated imports in `src/lib.rs`
+- kept the first pass conservative by continuing to reference `crate::FrontmatterWarning` from the new module
 
 Reason:
 - these are document-section mechanics

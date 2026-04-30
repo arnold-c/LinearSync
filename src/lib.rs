@@ -4,6 +4,7 @@ mod linear {
 }
 mod notes {
     pub(crate) mod frontmatter;
+    pub(crate) mod sections;
 }
 
 use crate::cli::{Cli, Commands, ForceSelection, parse_force_selection};
@@ -16,6 +17,14 @@ use crate::notes::frontmatter::{
     normalize_frontmatter_key, normalize_project_name, override_frontmatter_value,
     parse_frontmatter_map, render_modified_yaml_value_diff, render_yaml_value_diff,
     yaml_string, yaml_string_list,
+};
+use crate::notes::sections::{
+    CONFLICT_SECTION_END, CONFLICT_SECTION_START, MANAGED_SECTION_END,
+    MANAGED_SECTION_START, NOTE_LOCATION_SECTION_END, NOTE_LOCATION_SECTION_START,
+    NoteLocationWarning, PUSH_SYNC_SECTION_END, PUSH_SYNC_SECTION_START, PushSyncWarning,
+    ManagedSectionWarning, ensure_managed_section, extract_managed_section,
+    extract_managed_section_body, insert_or_remove_note_location_warning,
+    insert_or_remove_push_sync_section, remove_section, split_frontmatter,
 };
 use chrono::Utc;
 use clap::Parser;
@@ -31,14 +40,6 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::OnceLock;
 
-const MANAGED_SECTION_START: &str = "<!-- linear-sync:managed:start -->";
-const MANAGED_SECTION_END: &str = "<!-- linear-sync:managed:end -->";
-const CONFLICT_SECTION_START: &str = "<!-- linear-sync:frontmatter-conflict:start -->";
-const CONFLICT_SECTION_END: &str = "<!-- linear-sync:frontmatter-conflict:end -->";
-const PUSH_SYNC_SECTION_START: &str = "<!-- linear-sync:push-sync:start -->";
-const PUSH_SYNC_SECTION_END: &str = "<!-- linear-sync:push-sync:end -->";
-const NOTE_LOCATION_SECTION_START: &str = "<!-- linear-sync:note-location:start -->";
-const NOTE_LOCATION_SECTION_END: &str = "<!-- linear-sync:note-location:end -->";
 const ANSI_RED: &str = "\x1b[31m";
 const ANSI_GREEN: &str = "\x1b[32m";
 const ANSI_YELLOW: &str = "\x1b[33m";
@@ -1898,41 +1899,6 @@ linear_id: "[{issue_id}]({url})"
     }
 }
 
-fn ensure_managed_section(content: &str) -> String {
-    if content.contains(MANAGED_SECTION_START) && content.contains(MANAGED_SECTION_END) {
-        return content.to_string();
-    }
-
-    if let Some((frontmatter, body)) = split_frontmatter(content) {
-        let body = body.trim_start_matches('\n');
-        return format!("{frontmatter}\n{MANAGED_SECTION_START}\n{body}\n{MANAGED_SECTION_END}\n");
-    }
-
-    format!("{MANAGED_SECTION_START}\n{content}\n{MANAGED_SECTION_END}\n")
-}
-
-fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
-    let rest = content.strip_prefix("---\n")?;
-    let end = rest.find("\n---\n")?;
-    let frontmatter_end = 4 + end + 5;
-    Some((&content[..frontmatter_end], &content[frontmatter_end..]))
-}
-
-struct ManagedSectionWarning {
-    diff: String,
-}
-
-struct PushSyncWarning {
-    frontmatter: Option<FrontmatterWarning>,
-    managed: Option<ManagedSectionWarning>,
-    notes: Vec<String>,
-}
-
-struct NoteLocationWarning {
-    desired_path: PathBuf,
-    status: String,
-    identifier: String,
-}
 
 struct IssueUpdatePlan {
     input: JsonMap<String, Value>,
@@ -2079,101 +2045,6 @@ fn note_location_warning(
     }
 }
 
-fn insert_or_remove_generated_section(
-    content: &str,
-    start_marker: &str,
-    end_marker: &str,
-    block: Option<&str>,
-) -> String {
-    let without_existing = remove_section(content, start_marker, end_marker);
-    let Some(block) = block else {
-        return without_existing;
-    };
-
-    if let Some((frontmatter, body)) = split_frontmatter(&without_existing) {
-        format!(
-            "{frontmatter}\n\n{block}\n{}",
-            body.trim_start_matches('\n')
-        )
-    } else {
-        format!("{block}\n{without_existing}")
-    }
-}
-
-fn insert_or_remove_note_location_warning(
-    content: &str,
-    warning: Option<&NoteLocationWarning>,
-) -> String {
-    let block = warning.map(|warning| {
-        format!(
-            "{NOTE_LOCATION_SECTION_START}\n> [!warning] Move this note in Obsidian\n> Linear reports `{}` as status `{}`.\n> This file was updated in place to preserve backlinks.\n> Move it in Obsidian to `{}` so the folder matches the status.\n{NOTE_LOCATION_SECTION_END}\n",
-            warning.identifier,
-            warning.status,
-            warning.desired_path.display(),
-        )
-    });
-
-    insert_or_remove_generated_section(
-        content,
-        NOTE_LOCATION_SECTION_START,
-        NOTE_LOCATION_SECTION_END,
-        block.as_deref(),
-    )
-}
-
-fn insert_or_remove_push_sync_section(content: &str, warning: Option<&PushSyncWarning>) -> String {
-    let block = warning.map(|warning| {
-        let mut body = vec![
-            "> [!warning] Linear push requires review".to_string(),
-            "> This note still differs from Linear.".to_string(),
-        ];
-
-        if let Some(frontmatter) = &warning.frontmatter {
-            body.push(
-                "> Frontmatter differences were not fully pushed. Reconcile manually or run `push --force`."
-                    .to_string(),
-            );
-            body.push(">".to_string());
-            body.push("> Frontmatter diff:".to_string());
-            body.push("> ```diff".to_string());
-            body.extend(frontmatter.diff.lines().map(|line| format!("> {line}")));
-            body.push("> ```".to_string());
-        }
-
-        if let Some(managed) = &warning.managed {
-            body.push(">".to_string());
-            body.push("> Managed block diff (edit the issue in Linear instead):".to_string());
-            body.push("> ```diff".to_string());
-            body.extend(managed.diff.lines().map(|line| format!("> {line}")));
-            body.push("> ```".to_string());
-        }
-
-        if !warning.notes.is_empty() {
-            body.push(">".to_string());
-            body.push("> Notes:".to_string());
-            body.extend(warning.notes.iter().map(|note| format!("> - {note}")));
-        }
-
-        format!(
-            "{PUSH_SYNC_SECTION_START}\n{}\n{PUSH_SYNC_SECTION_END}\n",
-            body.join("\n")
-        )
-    });
-
-    insert_or_remove_generated_section(
-        content,
-        PUSH_SYNC_SECTION_START,
-        PUSH_SYNC_SECTION_END,
-        block.as_deref(),
-    )
-}
-
-fn extract_managed_section_body(content: &str) -> Option<&str> {
-    let managed = extract_managed_section(content)?;
-    let managed = managed.strip_prefix(MANAGED_SECTION_START)?;
-    let managed = managed.strip_suffix(MANAGED_SECTION_END)?;
-    Some(managed.trim())
-}
 
 fn normalize_managed_section_for_diff(content: &str) -> Vec<String> {
     extract_managed_section_body(content)
@@ -2630,34 +2501,6 @@ new body
     }
 }
 
-fn extract_managed_section(content: &str) -> Option<&str> {
-    extract_section(content, MANAGED_SECTION_START, MANAGED_SECTION_END)
-}
-
-fn extract_section<'a>(content: &'a str, start_marker: &str, end_marker: &str) -> Option<&'a str> {
-    let start = content.find(start_marker)?;
-    let after_start = start + start_marker.len();
-    let end_relative = content[after_start..].find(end_marker)?;
-    let end = after_start + end_relative + end_marker.len();
-    Some(&content[start..end])
-}
-
-fn remove_section(content: &str, start_marker: &str, end_marker: &str) -> String {
-    match extract_section(content, start_marker, end_marker) {
-        Some(section) => {
-            let prefix = content
-                .split_once(section)
-                .map(|(before, _)| before)
-                .unwrap_or("");
-            let suffix = content
-                .rsplit_once(section)
-                .map(|(_, after)| after)
-                .unwrap_or("");
-            format!("{prefix}{suffix}")
-        }
-        None => content.to_string(),
-    }
-}
 
 fn extract_user_content(content: &str) -> Option<String> {
     let content = remove_section(content, CONFLICT_SECTION_START, CONFLICT_SECTION_END);
