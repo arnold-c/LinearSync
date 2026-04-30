@@ -321,7 +321,7 @@ Reason:
 Important note:
 - even though `write_note_to_path()` performs I/O, it is tightly coupled to note path semantics, so keeping it here is acceptable for the first pass
 
-### `src/output/diff.rs`
+### `src/output/diff.rs` - DONE
 
 Move:
 - `print_colored_diff`
@@ -338,6 +338,12 @@ Move:
   - `ANSI_YELLOW`
   - `ANSI_BLUE`
   - `ANSI_RESET`
+
+Completed:
+- created `src/output/diff.rs`
+- moved terminal diff rendering helpers and ANSI color constants out of `src/lib.rs`
+- added the `output::diff` module and updated imports in `src/lib.rs`
+- kept behavior unchanged while preserving existing delta fallback behavior
 
 Reason:
 - terminal diff rendering is an output concern
