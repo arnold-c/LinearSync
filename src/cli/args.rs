@@ -104,7 +104,7 @@ pub(crate) fn parse_force_selection(values: &[String]) -> ForceSelection {
     ForceSelection::Selected(
         values
             .iter()
-            .map(|value| crate::normalize_frontmatter_key(value))
+            .map(|value| crate::notes::frontmatter::normalize_frontmatter_key(value))
             .filter(|value| !value.is_empty())
             .collect(),
     )

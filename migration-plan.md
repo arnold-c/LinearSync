@@ -94,7 +94,7 @@ This does **not** need to introduce a new `run()` abstraction immediately.
 
 ## Module-by-module move plan
 
-### `src/cli/args.rs`
+### `src/cli/args.rs` - DONE
 
 Move:
 - `Cli`
@@ -102,11 +102,17 @@ Move:
 - `ForceSelection`
 - `parse_force_selection`
 
+Completed:
+- created `src/cli/args.rs` and `src/cli/mod.rs`
+- moved the clap-facing CLI types and force-selection parsing out of the old flat `src/cli.rs`
+- updated `parse_force_selection()` to call the normalized frontmatter helper through its new module path
+- removed the old `src/cli.rs` file after converting the CLI code to a directory module
+
 Reason:
 - keeps clap-facing types together
 - isolates argument parsing from core logic
 
-### `src/cli/prompt.rs`
+### `src/cli/prompt.rs` - DONE
 
 Move:
 - `PullSelection`
@@ -114,6 +120,12 @@ Move:
 - `prompt_for_pull_selection`
 - `prompt_for_merge_all_teams`
 - `prompt_for_output_dir`
+
+Completed:
+- created `src/cli/prompt.rs`
+- moved pull team-selection and output-directory prompt logic out of `src/lib.rs`
+- re-exported the prompt helpers through `src/cli/mod.rs` and updated imports in `src/lib.rs`
+- removed now-unused path and stdin/stdout imports from `src/lib.rs`
 
 Reason:
 - these are CLI interaction concerns
