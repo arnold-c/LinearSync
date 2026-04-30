@@ -75,9 +75,15 @@ Keep only:
 
 Everything else should move out.
 
-### 2. `src/lib.rs`
+### 2. `src/lib.rs` - DONE
 
 Create a library entrypoint that re-exports the modules needed by `main.rs`.
+
+Completed:
+- created `src/lib.rs`
+- moved the existing application entrypoint into `linear_sync::run()`
+- updated `src/main.rs` to be a thin binary wrapper calling the library
+- kept the first pass conservative by leaving most code in `lib.rs` for now
 
 Initial purpose:
 - define module tree
