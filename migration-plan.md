@@ -196,7 +196,7 @@ Completed:
 Reason:
 - cohesive YAML/frontmatter utilities
 
-### `src/notes/render.rs`
+### `src/notes/render.rs` - DONE
 
 Move:
 - `TemplateContext`
@@ -214,6 +214,12 @@ Move:
 - `default_markdown_content`
 - `DEFAULT_TEMPLATE_PATH`
 - `INSTALLED_TEMPLATE_PATH`
+
+Completed:
+- created `src/notes/render.rs`
+- moved template discovery/loading and note rendering helpers out of `src/lib.rs`
+- added the `notes::render` module and updated imports in `src/lib.rs`
+- kept tests compiling by importing managed-section markers from `notes::sections`
 
 Reason:
 - template loading and note rendering belong together

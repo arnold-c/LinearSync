@@ -5,6 +5,7 @@ mod linear {
 mod notes {
     pub(crate) mod frontmatter;
     pub(crate) mod paths;
+    pub(crate) mod render;
     pub(crate) mod sections;
 }
 
@@ -15,21 +16,23 @@ use crate::linear::models::{
 };
 use crate::notes::frontmatter::{
     collect_frontmatter_keys, extract_ignored_properties, extract_linear_id_from_frontmatter,
-    normalize_frontmatter_key, normalize_project_name, override_frontmatter_value,
-    parse_frontmatter_map, render_modified_yaml_value_diff, render_yaml_value_diff,
-    yaml_string, yaml_string_list,
+    normalize_frontmatter_key, normalize_project_name, parse_frontmatter_map,
+    render_modified_yaml_value_diff, render_yaml_value_diff, yaml_string, yaml_string_list,
 };
 use crate::notes::paths::{
     default_output_dir_for_team, default_output_root_for_all_teams, file_path_for_issue,
     final_note_path_after_push, note_location_warning, slugify_team_name, status_slug,
     write_note_to_path,
 };
+use crate::notes::render::{
+    TemplateContext, default_markdown_content, initialize_installed_template_path, load_template,
+    render_remote_issue_note, render_template,
+};
 use crate::notes::sections::{
-    CONFLICT_SECTION_END, CONFLICT_SECTION_START, MANAGED_SECTION_END,
-    MANAGED_SECTION_START, NOTE_LOCATION_SECTION_END, NOTE_LOCATION_SECTION_START,
-    ManagedSectionWarning, PUSH_SYNC_SECTION_END,
-    PUSH_SYNC_SECTION_START, PushSyncWarning, ensure_managed_section,
-    extract_managed_section, extract_managed_section_body,
+    CONFLICT_SECTION_END, CONFLICT_SECTION_START, NOTE_LOCATION_SECTION_END,
+    NOTE_LOCATION_SECTION_START, ManagedSectionWarning, PUSH_SYNC_SECTION_END,
+    PUSH_SYNC_SECTION_START, PushSyncWarning, extract_managed_section,
+    extract_managed_section_body,
     insert_or_remove_note_location_warning, insert_or_remove_push_sync_section,
     remove_section, split_frontmatter,
 };
@@ -45,7 +48,6 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::OnceLock;
 
 const ANSI_RED: &str = "\x1b[31m";
 const ANSI_GREEN: &str = "\x1b[32m";
@@ -54,10 +56,7 @@ const ANSI_BLUE: &str = "\x1b[34m";
 const ANSI_RESET: &str = "\x1b[0m";
 
 const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
-const DEFAULT_TEMPLATE_PATH: &str = "template.md";
 const ALL_TEAMS_OPTION: &str = "ALL TEAMS";
-
-static INSTALLED_TEMPLATE_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 
 struct LocalNote {
@@ -1676,236 +1675,6 @@ fn pull_issues(
     stats
 }
 
-struct TemplateContext<'a> {
-    title: &'a str,
-    status: &'a str,
-    priority: &'a str,
-    issue_id: &'a str,
-    identifier: &'a str,
-    url: &'a str,
-    project: &'a str,
-    description_section: &'a str,
-    labels_yaml: &'a str,
-    gh_yaml: &'a str,
-    now: &'a str,
-    team_name: &'a str,
-}
-
-struct RenderedNote {
-    content: String,
-    ignored_properties: Vec<String>,
-}
-
-fn load_template(template_path: Option<&Path>) -> Option<String> {
-    let path = template_path
-        .map(Path::to_path_buf)
-        .or_else(default_template_path_if_present);
-
-    path.map(|path| {
-        fs::read_to_string(&path).unwrap_or_else(|error| {
-            eprintln!(
-                "❌ Error: Failed to read template file '{}': {}",
-                path.display(),
-                error
-            );
-            process::exit(1);
-        })
-    })
-}
-
-fn default_template_path_if_present() -> Option<PathBuf> {
-    default_template_search_paths()
-        .into_iter()
-        .find(|path| path.is_file())
-}
-
-fn default_template_search_paths() -> Vec<PathBuf> {
-    let mut paths = vec![PathBuf::from(DEFAULT_TEMPLATE_PATH)];
-
-    if let Some(installed_path) = installed_template_path() {
-        paths.push(installed_path.clone());
-    }
-
-    paths
-}
-
-fn initialize_installed_template_path() {
-    let _ = INSTALLED_TEMPLATE_PATH.get_or_init(|| {
-        env::current_exe().ok().map(|exe_path| {
-            exe_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(DEFAULT_TEMPLATE_PATH)
-        })
-    });
-}
-
-fn installed_template_path() -> Option<&'static PathBuf> {
-    INSTALLED_TEMPLATE_PATH.get().and_then(|path| path.as_ref())
-}
-
-fn render_template(template: &str, context: &TemplateContext<'_>) -> RenderedNote {
-    let rendered = template
-        .replace("{{title}}", context.title)
-        .replace("{{status}}", context.status)
-        .replace("{{priority}}", context.priority)
-        .replace("{{linear_id}}", context.issue_id)
-        .replace("{{identifier}}", context.identifier)
-        .replace("{{url}}", context.url)
-        .replace("{{project}}", context.project)
-        .replace("{{description_section}}", context.description_section)
-        .replace("{{labels_yaml}}", context.labels_yaml)
-        .replace("{{github_links_yaml}}", context.gh_yaml)
-        .replace("{{last_synced}}", context.now)
-        .replace("{{team_name}}", context.team_name);
-
-    let ignored_properties = extract_ignored_properties(&rendered);
-
-    RenderedNote {
-        content: ensure_managed_section(&rendered),
-        ignored_properties,
-    }
-}
-
-fn description_section_from_text(description: &str) -> String {
-    let description = description.trim();
-    if description.is_empty() {
-        String::new()
-    } else {
-        let formatted_description = description.replace("\n", "\n> ");
-        format!(">[!info]+ Description\n> {formatted_description}\n\n")
-    }
-}
-
-fn labels_yaml_from_names(names: &[String]) -> String {
-    if names.is_empty() {
-        return String::new();
-    }
-
-    let mut labels_yaml = String::from("tags:\n");
-    for name in names {
-        labels_yaml.push_str(&format!("  - {}\n", name.replace(' ', "-")));
-    }
-    labels_yaml
-}
-
-fn github_links_yaml_from_urls(urls: &[String]) -> String {
-    let github_urls = urls
-        .iter()
-        .filter(|url| {
-            url.contains("github.com") && (url.contains("/pull/") || url.contains("/issues/"))
-        })
-        .collect::<Vec<_>>();
-
-    if github_urls.is_empty() {
-        return String::new();
-    }
-
-    let mut gh_yaml = String::from("github_links:\n");
-    for url in github_urls {
-        gh_yaml.push_str(&format!("  - \"{}\"\n", url));
-    }
-    gh_yaml
-}
-
-fn render_remote_issue_note(
-    issue: &RemoteIssue,
-    template: Option<&str>,
-    now: &str,
-    priority_values: &[PriorityInfo],
-) -> RenderedNote {
-    let description_section = description_section_from_text(&issue.description);
-    let labels_yaml = labels_yaml_from_names(
-        &issue
-            .labels
-            .iter()
-            .map(|label| label.name.clone())
-            .collect::<Vec<_>>(),
-    );
-    let gh_yaml = github_links_yaml_from_urls(&issue.attachments);
-    let project_name = issue
-        .project
-        .as_ref()
-        .map(|project| project.name.as_str())
-        .unwrap_or("");
-
-    let mut rendered = match template {
-        Some(template) => render_template(
-            template,
-            &TemplateContext {
-                title: &issue.title,
-                status: &issue.status,
-                priority: get_priority_label(priority_values, issue.priority),
-                issue_id: &issue.id,
-                identifier: &issue.identifier,
-                url: &issue.url,
-                project: project_name,
-                description_section: &description_section,
-                labels_yaml: &labels_yaml,
-                gh_yaml: &gh_yaml,
-                now,
-                team_name: &issue.team.name,
-            },
-        ),
-        None => default_markdown_content(
-            &issue.title,
-            &issue.status,
-            get_priority_label(priority_values, issue.priority),
-            &issue.id,
-            &labels_yaml,
-            &gh_yaml,
-            project_name,
-            &description_section,
-            &issue.url,
-            now,
-        ),
-    };
-
-    rendered.content = override_frontmatter_value(
-        &rendered.content,
-        "priority",
-        YamlValue::String(get_priority_label(priority_values, issue.priority).to_string()),
-    );
-    rendered
-}
-
-fn default_markdown_content(
-    title: &str,
-    status: &str,
-    priority: &str,
-    issue_id: &str,
-    labels_yaml: &str,
-    gh_yaml: &str,
-    project: &str,
-    description_section: &str,
-    url: &str,
-    now: &str,
-) -> RenderedNote {
-    let managed = format!(
-        r#"---
-title: "{title}"
-status: "{status}"
-priority: "{priority}"
-linear_id: "[{issue_id}]({url})"
-{labels_yaml}{gh_yaml}project: "[[{project}]]"
----
-
-{MANAGED_SECTION_START}
-{description_section}---
-*Last synced: {now}*
-{MANAGED_SECTION_END}
-
-## My notes
-"#
-    );
-
-    RenderedNote {
-        content: managed,
-        ignored_properties: Vec::new(),
-    }
-}
-
-
 struct IssueUpdatePlan {
     input: JsonMap<String, Value>,
     updated_keys: Vec<String>,
@@ -2138,6 +1907,7 @@ fn resolve_force_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notes::sections::{MANAGED_SECTION_END, MANAGED_SECTION_START};
 
     #[test]
     fn default_content_keeps_frontmatter_at_top() {
