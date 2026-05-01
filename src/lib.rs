@@ -27,9 +27,10 @@ use crate::error::AppError;
 use crate::linear::client::fetch_priority_values;
 use crate::notes::render::initialize_installed_template_path;
 use clap::Parser;
-use dotenvy::dotenv;
+use dotenvy::{dotenv, from_path};
 use reqwest::blocking::Client;
 use std::env;
+use std::path::Path;
 use std::process;
 
 pub fn run() {
@@ -40,14 +41,14 @@ pub fn run() {
 }
 
 fn try_run() -> Result<(), AppError> {
-    dotenv().ok();
     initialize_installed_template_path();
 
     let cli = Cli::parse();
+    load_environment(cli.env_file.as_deref())?;
 
     let api_key = env::var("LINEAR_API_KEY").map_err(|_| {
         AppError::message(
-            "LINEAR_API_KEY is not set.\nPlease provide your Linear API key by doing one of the following:\n  1. Create a .env file in the directory where you run this command containing:\n     LINEAR_API_KEY=lin_api_your_key_here\n  2. Export it directly in your shell:\n     export LINEAR_API_KEY=lin_api_your_key_here\n",
+            "LINEAR_API_KEY is not set.\nPlease provide your Linear API key by doing one of the following:\n  1. Pass an env file explicitly:\n     linear-sync --env-file /path/to/workspace.env pull\n     with LINEAR_API_KEY=lin_api_your_key_here inside that file\n  2. Create a .env file in the directory where you run this command containing:\n     LINEAR_API_KEY=lin_api_your_key_here\n  3. Export it directly in your shell:\n     export LINEAR_API_KEY=lin_api_your_key_here\n",
         )
     })?;
 
@@ -106,6 +107,21 @@ fn try_run() -> Result<(), AppError> {
                 !*no_delta,
             )?;
         }
+    }
+
+    Ok(())
+}
+
+fn load_environment(env_file: Option<&Path>) -> Result<(), AppError> {
+    if let Some(path) = env_file {
+        from_path(path).map_err(|error| {
+            AppError::message(format!(
+                "Failed to load env file `{}`: {error}",
+                path.display()
+            ))
+        })?;
+    } else {
+        dotenv().ok();
     }
 
     Ok(())

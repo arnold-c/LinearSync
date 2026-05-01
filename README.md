@@ -11,7 +11,7 @@ It is designed for note-taking workflows such as Obsidian, where each issue beco
 - Optionally merge issues from all teams into one directory
 - Interactive pull confirmation flow for team and output selection
 - Extract GitHub issue and PR links from Linear attachments
-- Load the Linear API key from environment variables or a `.env` file
+- Load the Linear API key from environment variables, a `.env` file, or an explicitly selected env file
 
 ## Requirements
 
@@ -45,9 +45,27 @@ cargo install --path .
 
 LinearSync requires a Linear API key.
 
-You can provide it in either of these ways:
+You can provide it in any of these ways:
 
-### Option 1: `.env` file
+### Option 1: explicit env file
+
+Pass an env file path on the command line:
+
+```bash
+cargo run -- --env-file ~/.config/linear-sync/work.env pull
+cargo run -- --env-file ~/.config/linear-sync/work.env push --input-dir /path/to/notes
+```
+
+Example env file contents:
+
+```env
+LINEAR_API_KEY=lin_api_your_key_here
+```
+
+This is the simplest way to switch between multiple Linear workspaces with different API keys.
+Shell environment variables still take precedence if `LINEAR_API_KEY` is already set.
+
+### Option 2: `.env` file
 
 Create a `.env` file in the directory where you run the command:
 
@@ -55,7 +73,7 @@ Create a `.env` file in the directory where you run the command:
 LINEAR_API_KEY=lin_api_your_key_here
 ```
 
-### Option 2: shell environment
+### Option 3: shell environment
 
 ```bash
 export LINEAR_API_KEY=lin_api_your_key_here
@@ -64,18 +82,22 @@ export LINEAR_API_KEY=lin_api_your_key_here
 ## Usage
 
 ```bash
-cargo run -- pull [OPTIONS]
-cargo run -- push --input-dir <PATH>
+cargo run -- [GLOBAL_OPTIONS] pull [OPTIONS]
+cargo run -- [GLOBAL_OPTIONS] push --input-dir <PATH>
 ```
 
 Or with the built binary:
 
 ```bash
-./target/release/LinearSync pull [OPTIONS]
-./target/release/LinearSync push --input-dir <PATH>
+./target/release/LinearSync [GLOBAL_OPTIONS] pull [OPTIONS]
+./target/release/LinearSync [GLOBAL_OPTIONS] push --input-dir <PATH>
 ```
 
 ## Commands
+
+### Global options
+
+- `-e, --env-file <PATH>`: Load environment variables from a specific env file before resolving `LINEAR_API_KEY`
 
 ### `pull`
 
@@ -107,6 +129,12 @@ Pull issues for a specific team:
 
 ```bash
 cargo run -- pull --team-id <TEAM_ID>
+```
+
+Pull using a workspace-specific env file:
+
+```bash
+cargo run -- --env-file ~/.config/linear-sync/work.env pull --team-id <TEAM_ID>
 ```
 
 Pull a single issue:
@@ -165,6 +193,12 @@ Instead, it prints diffs to stdout and writes a warning block into the local not
 
 ```bash
 cargo run -- push --input-dir /path/to/notes
+```
+
+Push using a workspace-specific env file:
+
+```bash
+cargo run -- --env-file ~/.config/linear-sync/work.env push --input-dir /path/to/notes
 ```
 
 Push a single issue:

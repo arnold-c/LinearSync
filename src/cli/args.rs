@@ -9,6 +9,10 @@ use std::path::PathBuf;
     about = "Syncs Linear issues with local Markdown files"
 )]
 pub(crate) struct Cli {
+    /// Path to an env file to load before resolving LINEAR_API_KEY.
+    /// Shell environment variables still take precedence.
+    #[arg(short = 'e', long, global = true)]
+    pub(crate) env_file: Option<PathBuf>,
     #[command(subcommand)]
     pub(crate) command: Commands,
 }
@@ -108,4 +112,27 @@ pub(crate) fn parse_force_selection(values: &[String]) -> ForceSelection {
             .filter(|value| !value.is_empty())
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_env_file_before_subcommand() {
+        let cli = Cli::try_parse_from(["linear-sync", "--env-file", "acme.env", "pull"])
+            .expect("expected CLI to parse");
+
+        assert_eq!(cli.env_file, Some(PathBuf::from("acme.env")));
+        assert!(matches!(cli.command, Commands::Pull { .. }));
+    }
+
+    #[test]
+    fn parses_env_file_after_subcommand() {
+        let cli = Cli::try_parse_from(["linear-sync", "pull", "--env-file", "acme.env"])
+            .expect("expected CLI to parse");
+
+        assert_eq!(cli.env_file, Some(PathBuf::from("acme.env")));
+        assert!(matches!(cli.command, Commands::Pull { .. }));
+    }
 }
