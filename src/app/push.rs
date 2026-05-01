@@ -43,6 +43,132 @@ pub(crate) struct IssueUpdatePlan {
     pub(crate) will_move_to_done: bool,
 }
 
+struct PushNoteFailure {
+    error: AppError,
+    sync_warning: PushSyncWarning,
+    show_identifier_in_header: bool,
+}
+
+impl PushNoteFailure {
+    fn missing_remote_issue(local_note: &LocalNote) -> Self {
+        Self {
+            error: AppError::message(format!(
+                "Could not find a Linear issue for `{}`.",
+                local_note.identifier
+            )),
+            sync_warning: PushSyncWarning {
+                frontmatter: None,
+                managed: None,
+                notes: vec![format!(
+                    "Could not find a Linear issue for `{}`. The note name is not changed automatically; verify the file name stem or `linear_id` frontmatter.",
+                    local_note.identifier
+                )],
+            },
+            show_identifier_in_header: true,
+        }
+    }
+
+    fn fetch_error(error: AppError) -> Self {
+        Self {
+            sync_warning: PushSyncWarning {
+                frontmatter: None,
+                managed: None,
+                notes: vec![error.to_string()],
+            },
+            error,
+            show_identifier_in_header: false,
+        }
+    }
+}
+
+fn fetch_remote_issue_for_push(
+    client: &Client,
+    api_key: &str,
+    local_note: &LocalNote,
+) -> Result<RemoteIssue, PushNoteFailure> {
+    match fetch_remote_issue_for_note(client, api_key, local_note) {
+        Ok(Some(issue)) => Ok(issue),
+        Ok(None) => Err(PushNoteFailure::missing_remote_issue(local_note)),
+        Err(error) => Err(PushNoteFailure::fetch_error(error)),
+    }
+}
+
+fn handle_push_note_failure(
+    local_note: &LocalNote,
+    note_content: &str,
+    dry_run: bool,
+    failure: PushNoteFailure,
+) -> PushStats {
+    if failure.show_identifier_in_header {
+        println!(
+            "{red}✗ Push error:{reset} {} ({})",
+            local_note.path.display(),
+            local_note.identifier,
+            red = ANSI_RED,
+            reset = ANSI_RESET,
+        );
+    } else {
+        println!(
+            "{red}✗ Push error:{reset} {}\n  {error}",
+            local_note.path.display(),
+            error = failure.error,
+            red = ANSI_RED,
+            reset = ANSI_RESET,
+        );
+    }
+
+    if !dry_run
+        && let Err(error) =
+            write_push_sync_warning(&local_note.path, note_content, &failure.sync_warning)
+    {
+        println!(
+            "{red}✗ Push error:{reset} {error}",
+            red = ANSI_RED,
+            reset = ANSI_RESET,
+        );
+    }
+
+    PushStats {
+        warnings: 1,
+        errors: 1,
+        ..PushStats::default()
+    }
+}
+
+fn write_push_sync_warning(
+    note_path: &Path,
+    note_content: &str,
+    warning: &PushSyncWarning,
+) -> Result<(), AppError> {
+    let note_content = insert_or_remove_push_sync_section(note_content, Some(warning));
+    fs::write(note_path, note_content).map_err(|error| {
+        AppError::message(format!(
+            "failed to write {}: {}",
+            note_path.display(),
+            error
+        ))
+    })
+}
+
+fn persist_pushed_note(
+    local_note: &LocalNote,
+    note_content: &str,
+    sync_warning: Option<&PushSyncWarning>,
+    final_status_for_path: &str,
+) -> Result<(), AppError> {
+    let note_content = insert_or_remove_push_sync_section(note_content, sync_warning);
+    let note_content = insert_or_remove_conflict_section(&note_content, None);
+    let final_path = final_note_path_after_push(&local_note.path, final_status_for_path);
+
+    write_note_to_path(&local_note.path, &final_path, &note_content).map_err(|error| {
+        AppError::message(format!(
+            "failed to write {}: {}",
+            final_path.display(),
+            error
+        ))
+    })
+}
+
 pub(crate) fn push_command(
     client: &Client,
     api_key: &str,
@@ -135,71 +261,14 @@ pub(crate) fn push_note(
         }
     };
 
-    let mut note_content = local_note.content.clone();
-
-    let remote_issue = match fetch_remote_issue_for_note(client, api_key, &local_note) {
-        Ok(Some(issue)) => issue,
-        Ok(None) => {
-            let warning = PushSyncWarning {
-                frontmatter: None,
-                managed: None,
-                notes: vec![format!(
-                    "Could not find a Linear issue for `{}`. The note name is not changed automatically; verify the file name stem or `linear_id` frontmatter.",
-                    local_note.identifier
-                )],
-            };
-            println!(
-                "{red}✗ Push error:{reset} {} ({})",
-                local_note.path.display(),
-                local_note.identifier,
-                red = ANSI_RED,
-                reset = ANSI_RESET,
-            );
-            if !dry_run {
-                note_content = insert_or_remove_push_sync_section(&note_content, Some(&warning));
-                if let Err(error) = fs::write(&local_note.path, note_content) {
-                    println!(
-                        "{red}✗ Push error:{reset} failed to write {}: {}",
-                        local_note.path.display(),
-                        error,
-                        red = ANSI_RED,
-                        reset = ANSI_RESET,
-                    );
-                }
-            }
-            stats.errors += 1;
-            stats.warnings += 1;
-            return stats;
-        }
-        Err(error) => {
-            let warning = PushSyncWarning {
-                frontmatter: None,
-                managed: None,
-                notes: vec![error.to_string()],
-            };
-            println!(
-                "{red}✗ Push error:{reset} {}\n  {error}",
-                local_note.path.display(),
-                red = ANSI_RED,
-                reset = ANSI_RESET,
-            );
-            if !dry_run {
-                note_content = insert_or_remove_push_sync_section(&note_content, Some(&warning));
-                if let Err(write_error) = fs::write(&local_note.path, note_content) {
-                    println!(
-                        "{red}✗ Push error:{reset} failed to write {}: {}",
-                        local_note.path.display(),
-                        write_error,
-                        red = ANSI_RED,
-                        reset = ANSI_RESET,
-                    );
-                }
-            }
-            stats.errors += 1;
-            stats.warnings += 1;
-            return stats;
+    let remote_issue = match fetch_remote_issue_for_push(client, api_key, &local_note) {
+        Ok(issue) => issue,
+        Err(failure) => {
+            return handle_push_note_failure(&local_note, &local_note.content, dry_run, failure);
         }
     };
+
+    let mut note_content = local_note.content.clone();
 
     let mut remote_issue = remote_issue;
     let mut final_status_for_path = remote_issue.status.clone();
@@ -330,20 +399,20 @@ pub(crate) fn push_note(
             None
         };
 
-    if !dry_run {
-        note_content = insert_or_remove_push_sync_section(&note_content, sync_warning.as_ref());
-        note_content = insert_or_remove_conflict_section(&note_content, None);
-        let final_path = final_note_path_after_push(&local_note.path, &final_status_for_path);
-        if let Err(error) = write_note_to_path(&local_note.path, &final_path, &note_content) {
-            println!(
-                "{red}✗ Push error:{reset} failed to write {}: {}",
-                final_path.display(),
-                error,
-                red = ANSI_RED,
-                reset = ANSI_RESET,
-            );
-            stats.errors += 1;
-        }
+    if !dry_run
+        && let Err(error) = persist_pushed_note(
+            &local_note,
+            &note_content,
+            sync_warning.as_ref(),
+            &final_status_for_path,
+        )
+    {
+        println!(
+            "{red}✗ Push error:{reset} {error}",
+            red = ANSI_RED,
+            reset = ANSI_RESET,
+        );
+        stats.errors += 1;
     }
 
     if sync_warning.is_some() {

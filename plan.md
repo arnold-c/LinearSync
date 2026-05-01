@@ -16,15 +16,13 @@ Completed:
   `Result` for prompt I/O.
 - `src/notes/discovery.rs::parse_local_note()` now returns
   `Result<_, AppError>`.
+- `src/app/push.rs::push_note()` now uses structured helper functions
+  for remote issue lookup and note persistence while preserving
+  per-note warnings and reporting.
 - top-level exit handling remains confined to `src/lib.rs`.
 
 Still to do:
-1. Finish converting `src/app/push.rs::push_note()`
-   - reduce the remaining ad hoc per-branch error handling
-   - use structured propagation internally where it simplifies flow
-   - keep per-note warnings and user-facing reporting intact
-
-2. Propagate `Result` through remaining helpers where it improves
+1. Propagate `Result` through remaining helpers where it improves
    clarity
    - prefer `?` for fallible file and network operations when the
      caller should decide how to handle failure
@@ -33,9 +31,8 @@ Still to do:
 
 ## Recommended order
 
-1. `src/app/push.rs`
-2. remaining helper cleanup in pull/push flows
-3. boundary cleanup in `src/lib.rs` / `src/main.rs` if needed
+1. remaining helper cleanup in pull/push flows
+2. boundary cleanup in `src/lib.rs` / `src/main.rs` if needed
 
 ## Notes
 
