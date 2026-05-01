@@ -53,7 +53,9 @@ pub(crate) fn fetch_priority_values(
     let response = graphql_request(client, api_key, query, json!({}))?;
     let values = response["data"]["issuePriorityValues"]
         .as_array()
-        .ok_or_else(|| AppError::message("Could not retrieve issue priority values from Linear."))?;
+        .ok_or_else(|| {
+            AppError::message("Could not retrieve issue priority values from Linear.")
+        })?;
 
     Ok(values
         .iter()
@@ -70,7 +72,7 @@ pub(crate) fn fetch_remote_issue_for_note(
     client: &Client,
     api_key: &str,
     local_note: &LocalNote,
-) -> Result<Option<RemoteIssue>, String> {
+) -> Result<Option<RemoteIssue>, AppError> {
     if let Some(issue) = fetch_remote_issue_by_identifier(client, api_key, &local_note.identifier)?
     {
         return Ok(Some(issue));
@@ -88,7 +90,7 @@ pub(crate) fn fetch_remote_issue_by_identifier(
     client: &Client,
     api_key: &str,
     identifier: &str,
-) -> Result<Option<RemoteIssue>, String> {
+) -> Result<Option<RemoteIssue>, AppError> {
     let mut last_shape_error =
         match fetch_remote_issue_by_issue_v2_identifier(client, api_key, identifier) {
             Ok(Some(issue)) => return Ok(Some(issue)),
@@ -123,7 +125,7 @@ pub(crate) fn fetch_remote_issue_by_issue_v2_identifier(
     client: &Client,
     api_key: &str,
     identifier: &str,
-) -> Result<Option<RemoteIssue>, String> {
+) -> Result<Option<RemoteIssue>, AppError> {
     let query = r#"
     query GetIssueByIdentifier($identifier: String!) {
       issueV2(identifier: $identifier) {
@@ -172,8 +174,7 @@ pub(crate) fn fetch_remote_issue_by_issue_v2_identifier(
     }
     "#;
 
-    let response =
-        graphql_request_result(client, api_key, query, json!({ "identifier": identifier }))?;
+    let response = graphql_request(client, api_key, query, json!({ "identifier": identifier }))?;
     let issue = response["data"]["issueV2"]
         .as_object()
         .cloned()
@@ -186,7 +187,7 @@ pub(crate) fn fetch_remote_issue_by_team_and_number(
     api_key: &str,
     team_key: &str,
     issue_number: i64,
-) -> Result<Option<RemoteIssue>, String> {
+) -> Result<Option<RemoteIssue>, AppError> {
     let query = r#"
     query GetIssueByTeamAndNumber($teamKey: String!, $issueNumber: Int!) {
       team(id: $teamKey) {
@@ -239,7 +240,7 @@ pub(crate) fn fetch_remote_issue_by_team_and_number(
     }
     "#;
 
-    let response = graphql_request_result(
+    let response = graphql_request(
         client,
         api_key,
         query,
@@ -257,7 +258,7 @@ pub(crate) fn fetch_remote_issue_by_id(
     client: &Client,
     api_key: &str,
     issue_id: &str,
-) -> Result<Option<RemoteIssue>, String> {
+) -> Result<Option<RemoteIssue>, AppError> {
     let query = r#"
     query GetIssueById($id: String!) {
       issue(id: $id) {
@@ -306,7 +307,7 @@ pub(crate) fn fetch_remote_issue_by_id(
     }
     "#;
 
-    let response = graphql_request_result(client, api_key, query, json!({ "id": issue_id }))?;
+    let response = graphql_request(client, api_key, query, json!({ "id": issue_id }))?;
     let issue = response["data"]["issue"]
         .as_object()
         .cloned()
@@ -318,7 +319,7 @@ pub(crate) fn fetch_project_by_name(
     client: &Client,
     api_key: &str,
     project_name: &str,
-) -> Result<Option<ProjectInfo>, String> {
+) -> Result<Option<ProjectInfo>, AppError> {
     let query = r#"
     query GetProjectByName($projectName: String!) {
       projects(filter: { name: { eq: $projectName } }) {
@@ -330,7 +331,7 @@ pub(crate) fn fetch_project_by_name(
     }
     "#;
 
-    let response = graphql_request_result(
+    let response = graphql_request(
         client,
         api_key,
         query,
@@ -353,7 +354,7 @@ pub(crate) fn update_linear_issue(
     api_key: &str,
     issue_id: &str,
     input: JsonMap<String, Value>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let query = r#"
     mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
       issueUpdate(id: $id, input: $input) {
@@ -362,7 +363,7 @@ pub(crate) fn update_linear_issue(
     }
     "#;
 
-    let response = graphql_request_result(
+    let response = graphql_request(
         client,
         api_key,
         query,
@@ -375,46 +376,10 @@ pub(crate) fn update_linear_issue(
     if success {
         Ok(())
     } else {
-        Err("Linear issue update did not report success.".to_string())
+        Err(AppError::message(
+            "Linear issue update did not report success.",
+        ))
     }
-}
-
-pub(crate) fn graphql_request_result(
-    client: &Client,
-    api_key: &str,
-    query: &str,
-    variables: Value,
-) -> Result<Value, String> {
-    let response = client
-        .post(LINEAR_API_URL)
-        .header("Authorization", api_key)
-        .header("Content-Type", "application/json")
-        .json(&json!({ "query": query, "variables": variables }))
-        .send()
-        .map_err(|error| format!("failed to send request to Linear API: {error}"))?;
-
-    let status = response.status();
-    let body = response
-        .text()
-        .map_err(|error| format!("failed to read Linear API response: {error}"))?;
-
-    if !status.is_success() {
-        return Err(format!("Linear API request failed with {status}: {body}"));
-    }
-
-    let value = serde_json::from_str::<Value>(&body)
-        .map_err(|error| format!("failed to parse Linear API response JSON: {error}"))?;
-
-    if let Some(errors) = value["errors"].as_array()
-        && !errors.is_empty()
-    {
-        return Err(format!(
-            "Linear API returned GraphQL errors: {}",
-            value["errors"]
-        ));
-    }
-
-    Ok(value)
 }
 
 pub(crate) fn graphql_request(
@@ -429,17 +394,35 @@ pub(crate) fn graphql_request(
         .header("Content-Type", "application/json")
         .json(&json!({ "query": query, "variables": variables }))
         .send()
-        .map_err(|error| AppError::message(format!("Failed to send request to Linear API: {error}")))?;
+        .map_err(|error| {
+            AppError::message(format!("Failed to send request to Linear API: {error}"))
+        })?;
 
-    if response.status().is_success() {
-        response
-            .json()
-            .map_err(|error| AppError::message(format!("Failed to parse JSON: {error}")))
-    } else {
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        Err(AppError::message(format!("API request failed: {status}\nResponse body: {body}")))
+    let status = response.status();
+    let body = response.text().map_err(|error| {
+        AppError::message(format!("Failed to read Linear API response: {error}"))
+    })?;
+
+    if !status.is_success() {
+        return Err(AppError::message(format!(
+            "Linear API request failed with {status}: {body}"
+        )));
     }
+
+    let value = serde_json::from_str::<Value>(&body).map_err(|error| {
+        AppError::message(format!("Failed to parse Linear API response JSON: {error}"))
+    })?;
+
+    if let Some(errors) = value["errors"].as_array()
+        && !errors.is_empty()
+    {
+        return Err(AppError::message(format!(
+            "Linear API returned GraphQL errors: {}",
+            value["errors"]
+        )));
+    }
+
+    Ok(value)
 }
 
 pub(crate) fn fetch_required_issue(
@@ -447,23 +430,18 @@ pub(crate) fn fetch_required_issue(
     api_key: &str,
     identifier: &str,
 ) -> Result<RemoteIssue, AppError> {
-    match fetch_remote_issue_by_identifier(client, api_key, identifier) {
-        Ok(Some(issue)) => Ok(issue),
-        Ok(None) => Err(AppError::message(format!("Could not find Linear issue `{identifier}`."))),
-        Err(error) => Err(AppError::message(format!(
-            "Failed to fetch Linear issue `{identifier}`: {error}"
-        ))),
-    }
+    fetch_remote_issue_by_identifier(client, api_key, identifier)?
+        .ok_or_else(|| AppError::message(format!("Could not find Linear issue `{identifier}`.")))
 }
 
-pub(crate) fn parse_remote_issue(issue: Value) -> Result<RemoteIssue, String> {
+pub(crate) fn parse_remote_issue(issue: Value) -> Result<RemoteIssue, AppError> {
     let id = issue["id"]
         .as_str()
-        .ok_or_else(|| "Linear issue is missing an id".to_string())?
+        .ok_or_else(|| AppError::message("Linear issue is missing an id"))?
         .to_string();
     let identifier = issue["identifier"]
         .as_str()
-        .ok_or_else(|| "Linear issue is missing an identifier".to_string())?
+        .ok_or_else(|| AppError::message("Linear issue is missing an identifier"))?
         .to_string();
     let title = issue["title"].as_str().unwrap_or("No Title").to_string();
     let url = issue["url"].as_str().unwrap_or("").to_string();
@@ -558,11 +536,12 @@ pub(crate) fn parse_issue_identifier(identifier: &str) -> Option<(String, i64)> 
     }
 }
 
-pub(crate) fn is_graphql_shape_error(error: &str) -> bool {
-    error.contains("GRAPHQL_VALIDATION_FAILED")
-        || error.contains("Field \"")
-        || error.contains("Cannot query field")
-        || error.contains("Unknown argument")
+pub(crate) fn is_graphql_shape_error(error: &AppError) -> bool {
+    matches!(error, AppError::Message(message)
+        if message.contains("GRAPHQL_VALIDATION_FAILED")
+            || message.contains("Field \"")
+            || message.contains("Cannot query field")
+            || message.contains("Unknown argument"))
 }
 
 pub(crate) fn resolve_state<'a>(
@@ -585,7 +564,10 @@ pub(crate) fn resolve_state<'a>(
         })
 }
 
-pub(crate) fn resolve_label<'a>(labels: &'a [LabelInfo], desired_label: &str) -> Option<&'a LabelInfo> {
+pub(crate) fn resolve_label<'a>(
+    labels: &'a [LabelInfo],
+    desired_label: &str,
+) -> Option<&'a LabelInfo> {
     labels
         .iter()
         .find(|label| label.name == desired_label)

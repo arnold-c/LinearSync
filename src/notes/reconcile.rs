@@ -3,10 +3,9 @@ use crate::notes::frontmatter::{
     render_yaml_value_diff,
 };
 use crate::notes::sections::{
-    CONFLICT_SECTION_END, CONFLICT_SECTION_START, NOTE_LOCATION_SECTION_END,
+    CONFLICT_SECTION_END, CONFLICT_SECTION_START, ManagedSectionWarning, NOTE_LOCATION_SECTION_END,
     NOTE_LOCATION_SECTION_START, PUSH_SYNC_SECTION_END, PUSH_SYNC_SECTION_START,
-    ManagedSectionWarning, extract_managed_section, extract_managed_section_body,
-    remove_section, split_frontmatter,
+    extract_managed_section, extract_managed_section_body, remove_section, split_frontmatter,
 };
 use serde_yaml::Value as YamlValue;
 use std::fs;

@@ -111,7 +111,6 @@ fn try_run() -> Result<(), AppError> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use crate::notes::reconcile::{
@@ -432,5 +431,3 @@ new body
         assert!(updated.contains("linear-issues/done/ABC-1.md"));
     }
 }
-
-

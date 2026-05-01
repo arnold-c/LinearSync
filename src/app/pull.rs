@@ -5,9 +5,13 @@ use crate::linear::models::{PriorityInfo, RemoteIssue, TeamInfo, get_priority_la
 use crate::notes::discovery::{find_issue_note_in_other_status, include_done_issue};
 use crate::notes::paths::{file_path_for_issue, note_location_warning, slugify_team_name};
 use crate::notes::reconcile::{MergeResult, merge_with_existing_note};
-use crate::notes::render::{TemplateContext, default_markdown_content, load_template, render_template};
+use crate::notes::render::{
+    TemplateContext, default_markdown_content, load_template, render_template,
+};
 use crate::notes::sections::insert_or_remove_note_location_warning;
-use crate::output::diff::{ANSI_YELLOW, ANSI_RESET, format_delta_patch, print_colored_diff, print_delta_output};
+use crate::output::diff::{
+    ANSI_RESET, ANSI_YELLOW, format_delta_patch, print_colored_diff, print_delta_output,
+};
 use chrono::Utc;
 use reqwest::blocking::Client;
 use serde_json::json;
@@ -39,11 +43,13 @@ pub(crate) fn pull_command(
     let teams = fetch_teams(client, api_key)?;
 
     if teams.is_empty() {
-        return Err(AppError::message("No Linear teams were found for this account."));
+        return Err(AppError::message(
+            "No Linear teams were found for this account.",
+        ));
     }
 
     let selection = if confirm {
-        prompt_for_pull_selection(&teams, team_id, output_dir, merge_all_teams)
+        prompt_for_pull_selection(&teams, team_id, output_dir, merge_all_teams)?
     } else {
         resolve_pull_selection(&teams, team_id, output_dir, merge_all_teams)
     };

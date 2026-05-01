@@ -3,8 +3,7 @@ use std::path::PathBuf;
 
 pub(crate) const MANAGED_SECTION_START: &str = "<!-- linear-sync:managed:start -->";
 pub(crate) const MANAGED_SECTION_END: &str = "<!-- linear-sync:managed:end -->";
-pub(crate) const CONFLICT_SECTION_START: &str =
-    "<!-- linear-sync:frontmatter-conflict:start -->";
+pub(crate) const CONFLICT_SECTION_START: &str = "<!-- linear-sync:frontmatter-conflict:start -->";
 pub(crate) const CONFLICT_SECTION_END: &str = "<!-- linear-sync:frontmatter-conflict:end -->";
 pub(crate) const PUSH_SYNC_SECTION_START: &str = "<!-- linear-sync:push-sync:start -->";
 pub(crate) const PUSH_SYNC_SECTION_END: &str = "<!-- linear-sync:push-sync:end -->";

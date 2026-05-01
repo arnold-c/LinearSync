@@ -45,7 +45,10 @@ pub(crate) struct RemoteIssue {
     pub(crate) attachments: Vec<String>,
 }
 
-pub(crate) fn get_priority_label<'a>(priority_values: &'a [PriorityInfo], priority: i64) -> &'a str {
+pub(crate) fn get_priority_label<'a>(
+    priority_values: &'a [PriorityInfo],
+    priority: i64,
+) -> &'a str {
     priority_values
         .iter()
         .find(|v| v.priority == priority)

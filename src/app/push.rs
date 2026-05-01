@@ -1,8 +1,8 @@
 use crate::cli::ForceSelection;
 use crate::error::AppError;
 use crate::linear::client::{
-    fetch_project_by_name, fetch_remote_issue_by_id, fetch_remote_issue_for_note,
-    resolve_label, resolve_state, update_linear_issue,
+    fetch_project_by_name, fetch_remote_issue_by_id, fetch_remote_issue_for_note, resolve_label,
+    resolve_state, update_linear_issue,
 };
 use crate::linear::models::{PriorityInfo, RemoteIssue, get_priority_number};
 use crate::notes::discovery::{
@@ -16,8 +16,7 @@ use crate::notes::reconcile::{
 };
 use crate::notes::render::{load_template, render_remote_issue_note};
 use crate::notes::sections::{
-    PushSyncWarning, insert_or_remove_note_location_warning,
-    insert_or_remove_push_sync_section,
+    PushSyncWarning, insert_or_remove_note_location_warning, insert_or_remove_push_sync_section,
 };
 use crate::output::diff::{ANSI_BLUE, ANSI_RED, ANSI_RESET, ANSI_YELLOW, print_push_diff};
 use chrono::Utc;
@@ -176,7 +175,7 @@ pub(crate) fn push_note(
             let warning = PushSyncWarning {
                 frontmatter: None,
                 managed: None,
-                notes: vec![error.clone()],
+                notes: vec![error.to_string()],
             };
             println!(
                 "{red}✗ Push error:{reset} {}\n  {error}",
@@ -306,7 +305,7 @@ pub(crate) fn push_note(
                         }
                     }
                     Err(error) => {
-                        notes.push(error.clone());
+                        notes.push(error.to_string());
                         println!(
                             "{red}✗ Push error:{reset} {}\n  {error}",
                             local_note.path.display(),
@@ -418,7 +417,7 @@ pub(crate) fn build_issue_update_input(
                         Ok(None) => notes.push(format!(
                             "No Linear project named `{project_name}` was found."
                         )),
-                        Err(error) => notes.push(error),
+                        Err(error) => notes.push(error.to_string()),
                     },
                     None => {
                         input.insert("projectId".to_string(), Value::Null);

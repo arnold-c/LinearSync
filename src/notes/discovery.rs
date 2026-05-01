@@ -1,3 +1,4 @@
+use crate::error::AppError;
 use crate::notes::frontmatter::{
     extract_ignored_properties, extract_linear_id_from_frontmatter, parse_frontmatter_map,
 };
@@ -63,20 +64,21 @@ pub(crate) fn discover_markdown_notes_for_issue(
         .collect()
 }
 
-pub(crate) fn parse_local_note(path: &Path) -> Result<LocalNote, String> {
-    let content = fs::read_to_string(path)
-        .map_err(|error| format!("failed to read {}: {}", path.display(), error))?;
+pub(crate) fn parse_local_note(path: &Path) -> Result<LocalNote, AppError> {
+    let content = fs::read_to_string(path).map_err(|error| {
+        AppError::message(format!("failed to read {}: {}", path.display(), error))
+    })?;
     let (frontmatter, _) = split_frontmatter(&content)
-        .ok_or_else(|| "note is missing YAML frontmatter".to_string())?;
+        .ok_or_else(|| AppError::message("note is missing YAML frontmatter"))?;
     let frontmatter = parse_frontmatter_map(frontmatter)
-        .ok_or_else(|| "note frontmatter is not valid YAML".to_string())?;
+        .ok_or_else(|| AppError::message("note frontmatter is not valid YAML"))?;
 
     let identifier = path
         .file_stem()
         .and_then(|stem| stem.to_str())
         .map(str::trim)
         .filter(|stem| !stem.is_empty())
-        .ok_or_else(|| "note file name does not contain an issue identifier".to_string())?
+        .ok_or_else(|| AppError::message("note file name does not contain an issue identifier"))?
         .to_string();
 
     let ignored_properties = extract_ignored_properties(&content);
@@ -112,7 +114,10 @@ pub(crate) fn include_done_issue(
     include_done || existing_file_path != desired_file_path
 }
 
-pub(crate) fn find_issue_note_in_other_status(output_dir: &Path, identifier: &str) -> Option<PathBuf> {
+pub(crate) fn find_issue_note_in_other_status(
+    output_dir: &Path,
+    identifier: &str,
+) -> Option<PathBuf> {
     let target_name = format!("{}.md", identifier);
     let entries = fs::read_dir(output_dir).ok()?;
 
