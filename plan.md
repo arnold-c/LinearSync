@@ -20,19 +20,19 @@ Completed:
   for remote issue lookup and note persistence while preserving
   per-note warnings and reporting.
 - top-level exit handling remains confined to `src/lib.rs`.
+- remaining pull/push helper cleanup now routes fallible write and
+  refetch operations through small `Result`-returning helpers.
+- pull and push command code now decides whether to surface helper
+  failures as warnings, notes, or fatal errors.
+- no further boundary cleanup is currently needed in `src/lib.rs` or
+  `src/main.rs`; top-level exit handling remains in the runtime.
 
 Still to do:
-1. Propagate `Result` through remaining helpers where it improves
-   clarity
-   - prefer `?` for fallible file and network operations when the
-     caller should decide how to handle failure
-   - review pull/push write paths that still print and continue
-   - keep only the top-level runtime responsible for final process exit
+- none currently identified for this result-propagation follow-up.
 
 ## Recommended order
 
-1. remaining helper cleanup in pull/push flows
-2. boundary cleanup in `src/lib.rs` / `src/main.rs` if needed
+- no further work planned for this follow-up.
 
 ## Notes
 

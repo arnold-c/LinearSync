@@ -16,13 +16,33 @@ use chrono::Utc;
 use reqwest::blocking::Client;
 use serde_json::json;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Default)]
 pub(crate) struct PullStats {
     pub(crate) imported: usize,
     pub(crate) warnings: usize,
     pub(crate) delta_output: String,
+}
+
+fn persist_pulled_note(note_path: &Path, markdown_content: &str) -> Result<(), AppError> {
+    if let Some(parent) = note_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            AppError::message(format!(
+                "Failed to create directory {}: {}",
+                parent.display(),
+                error
+            ))
+        })?;
+    }
+
+    fs::write(note_path, markdown_content).map_err(|error| {
+        AppError::message(format!(
+            "Failed to write {}: {}",
+            note_path.display(),
+            error
+        ))
+    })
 }
 
 pub(crate) fn pull_command(
@@ -334,16 +354,12 @@ pub(crate) fn pull_issues(
         let wrote_note = if dry_run {
             true
         } else {
-            if let Some(parent) = existing_file_path.parent()
-                && let Err(e) = fs::create_dir_all(parent)
-            {
-                eprintln!("⚠️ Failed to create directory {:?}: {}", parent, e);
-                false
-            } else if let Err(e) = fs::write(&existing_file_path, &markdown_content) {
-                eprintln!("⚠️ Failed to write file {}.md: {}", identifier, e);
-                false
-            } else {
-                true
+            match persist_pulled_note(&existing_file_path, &markdown_content) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("⚠️ {error}");
+                    false
+                }
             }
         };
 

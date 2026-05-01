@@ -169,6 +169,18 @@ fn persist_pushed_note(
     })
 }
 
+fn refetch_remote_issue_after_update(
+    client: &Client,
+    api_key: &str,
+    issue_id: &str,
+) -> Result<Option<RemoteIssue>, AppError> {
+    fetch_remote_issue_by_id(client, api_key, issue_id).map_err(|error| {
+        AppError::message(format!(
+            "failed to refetch Linear issue `{issue_id}` after update: {error}"
+        ))
+    })
+}
+
 pub(crate) fn push_command(
     client: &Client,
     api_key: &str,
@@ -353,24 +365,29 @@ pub(crate) fn push_note(
                             note_content =
                                 insert_or_remove_note_location_warning(&note_content, None);
                         }
-                        if let Ok(Some(refetched_issue)) =
-                            fetch_remote_issue_by_id(client, api_key, &remote_issue.id)
-                        {
-                            remote_issue = refetched_issue;
-                            let refreshed_now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                            remote_note = render_remote_issue_note(
-                                &remote_issue,
-                                template,
-                                &refreshed_now,
-                                priority_values,
-                            );
-                            frontmatter_warning = push_frontmatter_diff_warning(
-                                &local_note.content,
-                                &remote_note.content,
-                                &local_note.ignored_properties,
-                            );
-                            managed_warning =
-                                managed_section_warning(&local_note.content, &remote_note.content);
+                        match refetch_remote_issue_after_update(client, api_key, &remote_issue.id) {
+                            Ok(Some(refetched_issue)) => {
+                                remote_issue = refetched_issue;
+                                let refreshed_now =
+                                    Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                                remote_note = render_remote_issue_note(
+                                    &remote_issue,
+                                    template,
+                                    &refreshed_now,
+                                    priority_values,
+                                );
+                                frontmatter_warning = push_frontmatter_diff_warning(
+                                    &local_note.content,
+                                    &remote_note.content,
+                                    &local_note.ignored_properties,
+                                );
+                                managed_warning = managed_section_warning(
+                                    &local_note.content,
+                                    &remote_note.content,
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(error) => notes.push(error.to_string()),
                         }
                     }
                     Err(error) => {
