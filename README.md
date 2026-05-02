@@ -11,7 +11,9 @@ It is designed for note-taking workflows such as Obsidian, where each issue beco
 - Optionally merge issues from all teams into one directory
 - Interactive pull confirmation flow for team and output selection
 - Extract GitHub issue and PR links from Linear attachments
-- Load the Linear API key from environment variables, a `.env` file, or an explicitly selected env file
+- Load workspace-specific settings from a TOML config with named profiles
+- Run one profile, several named profiles, or all configured profiles in one command
+- Read the Linear API key from a profile env file, an explicit env file, a `.env` file, or the shell environment
 
 ## Requirements
 
@@ -43,18 +45,76 @@ cargo install --path .
 
 ## Configuration
 
-LinearSync requires a Linear API key.
+LinearSync supports two ways of running:
 
-You can provide it in any of these ways:
+1. **profile mode** via a TOML config file
+2. **direct mode** via CLI flags plus `--env-file`, `.env`, or shell environment
 
-### Option 1: explicit env file
+Profile mode is recommended for syncing multiple Linear workspaces.
 
-Pass an env file path on the command line:
+### Profile config
 
-```bash
-cargo run -- --env-file ~/.config/linear-sync/work.env pull
-cargo run -- --env-file ~/.config/linear-sync/work.env push --input-dir /path/to/notes
+Default config path:
+
+```text
+~/.config/linear-sync/config.toml
 ```
+
+This repository also includes a fuller example at `./config.toml`.
+
+Minimal example:
+
+```toml
+[profiles.work]
+env_file = "env/work.env"
+template = "templates/work-template.md"
+
+[profiles.work.pull]
+team_id = "ACA"
+output_dir = "notes/linear/work"
+merge_all_teams = false
+confirm = false
+force = false
+include_done = false
+dry_run = false
+delta = true
+
+[profiles.work.push]
+input_dir = "notes/linear/work"
+force = ["title", "status", "priority"]
+include_done = false
+dry_run = false
+delta = true
+
+[profiles.personal]
+env_file = "env/personal.env"
+
+[profiles.personal.pull]
+output_dir = "notes/linear/personal"
+merge_all_teams = true
+
+[profiles.personal.push]
+input_dir = "notes/linear/personal"
+force = "all"
+```
+
+Config notes:
+
+- Profile names are user-defined.
+- `env_file` stores the path to an env file, not the API key itself.
+- Relative paths in the config are resolved relative to the config file.
+- Shared profile keys live under `[profiles.<name>]`.
+- Command-specific settings live under `[profiles.<name>.pull]` and `[profiles.<name>.push]`.
+- `template` can be defined at the profile level or per-command.
+- Boolean config values use positive names such as `confirm = false` and `delta = true`.
+- `push.force` accepts:
+    - `false` to disable pushing frontmatter changes by default
+    - `true` or `"all"` to push all supported properties
+    - a list such as `["title", "status"]` to push selected properties
+- `push.input_dir` must be provided either in the selected profile or via `--input-dir`.
+- `issue_id` is CLI-only and is not read from the config file.
+- If a config file exists and you omit `--profile`, LinearSync runs **all configured profiles** for the selected command.
+- `--profile all` explicitly does the same thing.
 
 Example env file contents:
 
@@ -62,10 +122,29 @@ Example env file contents:
 LINEAR_API_KEY=lin_api_your_key_here
 ```
 
-This is the simplest way to switch between multiple Linear workspaces with different API keys.
-Shell environment variables still take precedence if `LINEAR_API_KEY` is already set.
+### API key resolution
 
-### Option 2: `.env` file
+LinearSync resolves the API key in this order:
+
+1. the env file selected by `--env-file`
+2. the selected profile's `env_file`
+3. the shell environment variable `LINEAR_API_KEY`
+4. `.env` in the current directory or its parents
+
+When `--env-file` or a profile `env_file` is used, LinearSync reads `LINEAR_API_KEY` directly from that file. This keeps multi-profile runs isolated so one profile does not leak credentials into another.
+
+### Direct mode without profiles
+
+You can also run without a profile config.
+
+#### Option 1: explicit env file
+
+```bash
+cargo run -- --env-file ~/.config/linear-sync/work.env pull
+cargo run -- --env-file ~/.config/linear-sync/work.env push --input-dir /path/to/notes
+```
+
+#### Option 2: `.env` file
 
 Create a `.env` file in the directory where you run the command:
 
@@ -73,7 +152,9 @@ Create a `.env` file in the directory where you run the command:
 LINEAR_API_KEY=lin_api_your_key_here
 ```
 
-### Option 3: shell environment
+This make sense when you are only syncing a single Linear workspace's issues.
+
+#### Option 3: shell environment
 
 ```bash
 export LINEAR_API_KEY=lin_api_your_key_here
@@ -83,21 +164,24 @@ export LINEAR_API_KEY=lin_api_your_key_here
 
 ```bash
 cargo run -- [GLOBAL_OPTIONS] pull [OPTIONS]
-cargo run -- [GLOBAL_OPTIONS] push --input-dir <PATH>
+cargo run -- [GLOBAL_OPTIONS] push [OPTIONS]
 ```
 
 Or with the built binary:
 
 ```bash
 ./target/release/LinearSync [GLOBAL_OPTIONS] pull [OPTIONS]
-./target/release/LinearSync [GLOBAL_OPTIONS] push --input-dir <PATH>
+./target/release/LinearSync [GLOBAL_OPTIONS] push [OPTIONS]
 ```
 
 ## Commands
 
 ### Global options
 
-- `-e, --env-file <PATH>`: Load environment variables from a specific env file before resolving `LINEAR_API_KEY`
+- `--config <PATH>`: Load profiles from a specific TOML config file instead of `~/.config/linear-sync/config.toml`
+- `--profile <NAME[,NAME...]>`: Run one or more named profiles from the config file
+    - use `all`, or omit the flag entirely when a config file exists, to run all configured profiles
+- `-e, --env-file <PATH>`: Override the selected profile's `env_file` or read `LINEAR_API_KEY` from a specific env file in direct mode
 
 ### `pull`
 
@@ -112,10 +196,12 @@ By default, issues already in `Done` are skipped unless they need to be moved fr
 - `--issue-id <ISSUE-ID>`: Pull only a single issue, such as `ACA-125`
 - `--template <PATH>`: Use a specific Markdown template file for created notes
 - `-m, --merge-all-teams`: Merge issues from all teams into a single directory
-- `-c, --confirm`: Interactively confirm team selection, merge behavior, and output path
-- `--force`: Overwrite the entire note instead of only updating the managed section
-- `--include-done`: Include issues already in `done/` or not yet created locally with a `Done` status
-- `--dry-run`: Preview note changes without writing files
+- `--separate-team-dirs`: Keep separate team subdirectories when pulling all teams
+- `--confirm | --no-confirm`: Enable or disable the interactive confirmation flow
+- `--force | --no-force`: Overwrite the full note or preserve the unmanaged body
+- `--include-done | --skip-done`: Include or skip Done issues by default
+- `--dry-run | --no-dry-run`: Preview changes or apply them
+- `--delta | --no-delta`: Use delta rendering or YAML-style diff output
 
 #### Examples
 
@@ -125,13 +211,33 @@ Pull issues from all teams into the default directory structure:
 cargo run -- pull
 ```
 
+If a config file exists and no `--profile` is passed, this runs `pull` for all configured profiles.
+
+Use a specific config file:
+
+```bash
+cargo run -- --config ./config.toml --profile work pull
+```
+
 Pull issues for a specific team:
 
 ```bash
 cargo run -- pull --team-id <TEAM_ID>
 ```
 
-Pull using a workspace-specific env file:
+Pull a single named profile:
+
+```bash
+cargo run -- --profile work pull
+```
+
+Pull all configured profiles explicitly:
+
+```bash
+cargo run -- --profile all pull
+```
+
+Pull using a workspace-specific env file without profiles:
 
 ```bash
 cargo run -- --env-file ~/.config/linear-sync/work.env pull --team-id <TEAM_ID>
@@ -195,7 +301,25 @@ Instead, it prints diffs to stdout and writes a warning block into the local not
 cargo run -- push --input-dir /path/to/notes
 ```
 
-Push using a workspace-specific env file:
+Push a single named profile:
+
+```bash
+cargo run -- --profile work push
+```
+
+Use a specific config file:
+
+```bash
+cargo run -- --config ./config.toml --profile work push
+```
+
+Push all configured profiles explicitly:
+
+```bash
+cargo run -- --profile all push
+```
+
+Push using a workspace-specific env file without profiles:
 
 ```bash
 cargo run -- --env-file ~/.config/linear-sync/work.env push --input-dir /path/to/notes
@@ -212,13 +336,13 @@ cargo run -- push --input-dir /path/to/notes --issue-id ACA-125
 - `-i, --input-dir <PATH>`: Root directory containing issue notes
 - `--issue-id <ISSUE-ID>`: Push only a single issue, such as `ACA-125`
 - `-p, --template <PATH>`: Use a specific template when diffing the managed block
-- `--force[=<PROPERTY,...>]`: Push supported frontmatter properties to Linear
+- `--force[=<PROPERTY,...>] | --no-force`: Push supported frontmatter properties to Linear or disable configured push updates
     - supported properties: `title`, `status`, `priority`, `project`, `tags`
     - `--force` updates all supported differing properties found in the local note
     - `--force=title,status` updates only the listed properties
-- `--include-done`: Include notes already under a `done/` subdirectory
-- `--dry-run`: Preview changes without updating Linear or editing local notes
-- `--no-delta`: Use YAML-style diff output instead of delta rendering
+- `--include-done | --skip-done`: Include or skip notes already under a `done/` subdirectory
+- `--dry-run | --no-dry-run`: Preview changes or apply them
+- `--delta | --no-delta`: Use delta rendering or YAML-style diff output
 
 #### Push behavior
 
@@ -282,8 +406,10 @@ This avoids breaking backlinks by renaming or moving the file automatically.
 `pull` and `push` resolve templates in this order:
 
 1. the path passed via `--template`
-2. `./template.md` in your current working directory
-3. `template.md` next to the installed binary
+2. the command-specific profile template, such as `[profiles.work.pull].template`
+3. the shared profile template at `[profiles.work].template`
+4. `./template.md` in your current working directory
+5. `template.md` next to the installed binary
 
 This repository includes a default `template.md` at the project root.
 If you run from the repo, it will be picked up automatically.

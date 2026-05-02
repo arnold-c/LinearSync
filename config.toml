@@ -1,0 +1,136 @@
+# Example LinearSync config
+#
+# Default location:
+#   ~/.config/linear-sync/config.toml
+#
+# Notes:
+# - Profile names are arbitrary.
+# - If you omit --profile, LinearSync runs ALL profiles in this file.
+# - `--profile all` also runs all profiles.
+# - Relative paths are resolved relative to this config file.
+# - Do not store API keys here. Point `env_file` at a .env file instead.
+
+[profiles.work]
+# Path to an env file containing:
+#   LINEAR_API_KEY=lin_api_...
+env_file = "./env/work.env"
+
+# Optional shared template for both pull and push in this profile.
+template = "./templates/work-template.md"
+
+[profiles.work.pull]
+# Pull a specific Linear team by identifier/prefix.
+team_id = "ACA"
+
+# Where pulled notes should be written.
+output_dir = "~/notes/linear/work"
+
+# Pull behavior flags.
+merge_all_teams = false
+confirm = false
+force = false
+include_done = false
+dry_run = false
+delta = true
+
+[profiles.work.push]
+# Root directory to scan for notes when pushing.
+input_dir = "~/notes/linear/work"
+
+# Push behavior:
+# - true        => same as --force (push all supported properties)
+# - false       => same as --no-force
+# - "all"       => same as --force=all
+# - [list]      => same as --force=title,status,...
+force = ["title", "status", "priority", "project", "tags"]
+
+include_done = false
+dry_run = false
+delta = true
+
+
+[profiles.personal]
+env_file = "./env/personal.env"
+
+# Shared template for both commands in this profile.
+template = "./templates/personal-template.md"
+
+[profiles.personal.pull]
+# No team_id means "all teams".
+output_dir = "~/notes/linear/personal"
+merge_all_teams = true
+confirm = false
+force = false
+include_done = true
+dry_run = false
+delta = true
+
+[profiles.personal.push]
+input_dir = "~/notes/linear/personal"
+
+# Demonstrates string form for force.
+force = "all"
+
+include_done = true
+dry_run = false
+delta = true
+
+
+[profiles.client_a]
+env_file = "./env/client-a.env"
+
+[profiles.client_a.pull]
+team_id = "ENG"
+output_dir = "~/notes/clients/client-a/linear"
+
+# Demonstrates enabling interactive confirmation by default.
+confirm = true
+
+# Demonstrates force-overwrite pulls by default.
+force = true
+
+merge_all_teams = false
+include_done = false
+dry_run = true
+delta = false
+
+[profiles.client_a.push]
+input_dir = "~/notes/clients/client-a/linear"
+
+# Demonstrates fully disabling push updates by default.
+force = false
+
+include_done = false
+dry_run = true
+delta = false
+
+
+[profiles.client_b]
+env_file = "./env/client-b.env"
+
+# No shared template here; command-specific templates below.
+
+[profiles.client_b.pull]
+team_id = "OPS"
+output_dir = "~/notes/clients/client-b/linear"
+
+# Command-specific template overrides profile.template if both are set.
+template = "./templates/client-b-pull-template.md"
+
+merge_all_teams = false
+confirm = false
+force = false
+include_done = true
+dry_run = false
+delta = true
+
+[profiles.client_b.push]
+input_dir = "~/notes/clients/client-b/linear"
+template = "./templates/client-b-push-template.md"
+
+# Demonstrates pushing only selected properties.
+force = ["title", "status"]
+
+include_done = true
+dry_run = false
+delta = true

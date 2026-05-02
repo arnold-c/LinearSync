@@ -1,4 +1,5 @@
 mod cli;
+mod config;
 mod error;
 mod linear {
     pub(crate) mod client;
@@ -22,12 +23,13 @@ mod output {
 
 use crate::app::pull::pull_command;
 use crate::app::push::push_command;
-use crate::cli::{Cli, Commands, parse_force_selection};
+use crate::cli::Cli;
+use crate::config::{EffectiveCommand, ExecutionPlan, build_execution_plans, load_config};
 use crate::error::AppError;
 use crate::linear::client::fetch_priority_values;
 use crate::notes::render::initialize_installed_template_path;
 use clap::Parser;
-use dotenvy::{dotenv, from_path};
+use dotenvy::{Error as DotenvError, Iter, dotenv_iter, from_path_iter};
 use reqwest::blocking::Client;
 use std::env;
 use std::path::Path;
@@ -44,87 +46,147 @@ fn try_run() -> Result<(), AppError> {
     initialize_installed_template_path();
 
     let cli = Cli::parse();
-    load_environment(cli.env_file.as_deref())?;
-
-    let api_key = env::var("LINEAR_API_KEY").map_err(|_| {
-        AppError::message(
-            "LINEAR_API_KEY is not set.\nPlease provide your Linear API key by doing one of the following:\n  1. Pass an env file explicitly:\n     linear-sync --env-file /path/to/workspace.env pull\n     with LINEAR_API_KEY=lin_api_your_key_here inside that file\n  2. Create a .env file in the directory where you run this command containing:\n     LINEAR_API_KEY=lin_api_your_key_here\n  3. Export it directly in your shell:\n     export LINEAR_API_KEY=lin_api_your_key_here\n",
-        )
-    })?;
-
+    let loaded_config = load_config(cli.config.as_deref())?;
+    let plans = build_execution_plans(&cli, loaded_config.as_ref())?;
     let client = Client::new();
 
-    match &cli.command {
-        Commands::Pull {
-            team_id,
-            issue_id,
-            output_dir,
-            template,
-            merge_all_teams,
-            confirm,
-            force,
-            include_done,
-            dry_run,
-            no_delta,
-        } => {
-            let priority_values = fetch_priority_values(&client, &api_key)?;
-            pull_command(
-                &client,
-                &api_key,
-                &priority_values,
-                team_id.clone(),
-                output_dir.clone(),
-                issue_id.clone(),
-                template.clone(),
-                *merge_all_teams,
-                *confirm,
-                *force,
-                *include_done,
-                *dry_run,
-                !*no_delta,
-            )?;
-        }
-        Commands::Push {
-            input_dir,
-            issue_id,
-            template,
-            force,
-            include_done,
-            dry_run,
-            no_delta,
-        } => {
-            let priority_values = fetch_priority_values(&client, &api_key)?;
-            push_command(
-                &client,
-                &api_key,
-                &priority_values,
-                input_dir.clone(),
-                issue_id.clone(),
-                template.clone(),
-                parse_force_selection(force),
-                *include_done,
-                *dry_run,
-                !*no_delta,
-            )?;
-        }
-    }
-
-    Ok(())
+    execute_plans(&client, &plans)
 }
 
-fn load_environment(env_file: Option<&Path>) -> Result<(), AppError> {
-    if let Some(path) = env_file {
-        from_path(path).map_err(|error| {
-            AppError::message(format!(
-                "Failed to load env file `{}`: {error}",
-                path.display()
-            ))
-        })?;
-    } else {
-        dotenv().ok();
+fn execute_plans(client: &Client, plans: &[ExecutionPlan]) -> Result<(), AppError> {
+    let show_profile_headers = plans.iter().any(|plan| plan.profile_name.is_some());
+    let mut failures = Vec::new();
+
+    for (index, plan) in plans.iter().enumerate() {
+        if show_profile_headers {
+            if index > 0 {
+                println!();
+            }
+
+            if let Some(profile_name) = &plan.profile_name {
+                println!("==> Profile: {profile_name}");
+            }
+        }
+
+        if let Err(error) = execute_plan(client, plan) {
+            if let Some(profile_name) = &plan.profile_name {
+                failures.push(format!("- {profile_name}: {error}"));
+            } else {
+                failures.push(error.to_string());
+            }
+        }
     }
 
-    Ok(())
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    if failures.len() == 1 && plans.len() == 1 {
+        return Err(AppError::message(failures.remove(0)));
+    }
+
+    Err(AppError::message(format!(
+        "{} profile run(s) failed:\n{}",
+        failures.len(),
+        failures.join("\n")
+    )))
+}
+
+fn execute_plan(client: &Client, plan: &ExecutionPlan) -> Result<(), AppError> {
+    let api_key = resolve_api_key(plan.env_file.as_deref())?;
+    let priority_values = fetch_priority_values(client, &api_key)?;
+
+    match &plan.command {
+        EffectiveCommand::Pull(args) => pull_command(
+            client,
+            &api_key,
+            &priority_values,
+            args.team_id.clone(),
+            args.output_dir.clone(),
+            args.issue_id.clone(),
+            args.template.clone(),
+            args.merge_all_teams,
+            args.confirm,
+            args.force,
+            args.include_done,
+            args.dry_run,
+            args.use_delta,
+        ),
+        EffectiveCommand::Push(args) => push_command(
+            client,
+            &api_key,
+            &priority_values,
+            args.input_dir.clone(),
+            args.issue_id.clone(),
+            args.template.clone(),
+            args.force_selection.clone(),
+            args.include_done,
+            args.dry_run,
+            args.use_delta,
+        ),
+    }
+}
+
+fn resolve_api_key(env_file: Option<&Path>) -> Result<String, AppError> {
+    if let Some(path) = env_file {
+        return read_env_var_from_file(path, "LINEAR_API_KEY")?.ok_or_else(|| {
+            AppError::message(format!(
+                "LINEAR_API_KEY is not set in `{}`.",
+                path.display()
+            ))
+        });
+    }
+
+    if let Ok(api_key) = env::var("LINEAR_API_KEY") {
+        return Ok(api_key);
+    }
+
+    match dotenv_iter() {
+        Ok(iter) => {
+            if let Some(api_key) = read_env_var_from_iter(iter, "LINEAR_API_KEY")? {
+                return Ok(api_key);
+            }
+        }
+        Err(error) if error.not_found() => {}
+        Err(error) => {
+            return Err(AppError::message(format!("Failed to read `.env`: {error}")));
+        }
+    }
+
+    Err(AppError::message(
+        "LINEAR_API_KEY is not set.\nPlease provide your Linear API key by doing one of the following:\n  1. Pass an env file explicitly:\n     linear-sync --env-file /path/to/workspace.env pull\n     with LINEAR_API_KEY=lin_api_your_key_here inside that file\n  2. Configure a profile with an `env_file` in your config.toml\n  3. Create a .env file in the directory where you run this command containing:\n     LINEAR_API_KEY=lin_api_your_key_here\n  4. Export it directly in your shell:\n     export LINEAR_API_KEY=lin_api_your_key_here\n",
+    ))
+}
+
+fn read_env_var_from_file(path: &Path, key: &str) -> Result<Option<String>, AppError> {
+    let iter = from_path_iter(path).map_err(|error| {
+        AppError::message(format!(
+            "Failed to read env file `{}`: {error}",
+            path.display()
+        ))
+    })?;
+
+    read_env_var_from_iter(iter, key)
+}
+
+fn read_env_var_from_iter<R: std::io::Read>(
+    iter: Iter<R>,
+    key: &str,
+) -> Result<Option<String>, AppError> {
+    for item in iter {
+        let (name, value) = item.map_err(|error| match error {
+            DotenvError::LineParse(_, _) => {
+                AppError::message(format!("Failed to parse env file: {error}"))
+            }
+            other => AppError::message(format!("Failed to read env file: {other}")),
+        })?;
+
+        if name == key {
+            return Ok(Some(value));
+        }
+    }
+
+    Ok(None)
 }
 
 #[cfg(test)]
