@@ -18,12 +18,12 @@ env_file = "./env/work.env"
 # Optional shared template for both pull and push in this profile.
 template = "./templates/work-template.md"
 
+# Shared notes directory used by both pull and push.
+notes_dir = "~/notes/linear/work"
+
 [profiles.work.pull]
 # Pull a specific Linear team by identifier/prefix.
 team_id = "ACA"
-
-# Where pulled notes should be written.
-output_dir = "~/notes/linear/work"
 
 # Pull behavior flags.
 merge_all_teams = false
@@ -34,9 +34,6 @@ dry_run = false
 delta = true
 
 [profiles.work.push]
-# Root directory to scan for notes when pushing.
-input_dir = "~/notes/linear/work"
-
 # Push behavior:
 # - true        => same as --force (push all supported properties)
 # - false       => same as --no-force
@@ -55,9 +52,11 @@ env_file = "./env/personal.env"
 # Shared template for both commands in this profile.
 template = "./templates/personal-template.md"
 
+# Shared notes directory used by both pull and push.
+notes_dir = "~/notes/linear/personal"
+
 [profiles.personal.pull]
 # No team_id means "all teams".
-output_dir = "~/notes/linear/personal"
 merge_all_teams = true
 confirm = false
 force = false
@@ -66,8 +65,6 @@ dry_run = false
 delta = true
 
 [profiles.personal.push]
-input_dir = "~/notes/linear/personal"
-
 # Demonstrates string form for force.
 force = "all"
 
@@ -78,10 +75,10 @@ delta = true
 
 [profiles.client_a]
 env_file = "./env/client-a.env"
+notes_dir = "~/notes/clients/client-a/linear"
 
 [profiles.client_a.pull]
 team_id = "ENG"
-output_dir = "~/notes/clients/client-a/linear"
 
 # Demonstrates enabling interactive confirmation by default.
 confirm = true
@@ -95,8 +92,6 @@ dry_run = true
 delta = false
 
 [profiles.client_a.push]
-input_dir = "~/notes/clients/client-a/linear"
-
 # Demonstrates fully disabling push updates by default.
 force = false
 
@@ -107,12 +102,12 @@ delta = false
 
 [profiles.client_b]
 env_file = "./env/client-b.env"
+notes_dir = "~/notes/clients/client-b/linear"
 
 # No shared template here; command-specific templates below.
 
 [profiles.client_b.pull]
 team_id = "OPS"
-output_dir = "~/notes/clients/client-b/linear"
 
 # Command-specific template overrides profile.template if both are set.
 template = "./templates/client-b-pull-template.md"
@@ -125,7 +120,6 @@ dry_run = false
 delta = true
 
 [profiles.client_b.push]
-input_dir = "~/notes/clients/client-b/linear"
 template = "./templates/client-b-push-template.md"
 
 # Demonstrates pushing only selected properties.

@@ -19,6 +19,7 @@ pub(crate) struct AppConfig {
 struct ProfileConfig {
     env_file: Option<PathBuf>,
     template: Option<PathBuf>,
+    notes_dir: Option<PathBuf>,
     pull: Option<PullProfileConfig>,
     push: Option<PushProfileConfig>,
 }
@@ -26,7 +27,7 @@ struct ProfileConfig {
 #[derive(Debug, Deserialize, Default)]
 struct PullProfileConfig {
     team_id: Option<String>,
-    output_dir: Option<PathBuf>,
+    notes_dir: Option<PathBuf>,
     template: Option<PathBuf>,
     merge_all_teams: Option<bool>,
     confirm: Option<bool>,
@@ -38,7 +39,7 @@ struct PullProfileConfig {
 
 #[derive(Debug, Deserialize, Default)]
 struct PushProfileConfig {
-    input_dir: Option<PathBuf>,
+    notes_dir: Option<PathBuf>,
     template: Option<PathBuf>,
     force: Option<PushForceConfig>,
     include_done: Option<bool>,
@@ -258,6 +259,7 @@ fn build_profile_plan(
             Some(ProfileContext {
                 config_dir,
                 shared_template: profile.template.as_deref(),
+                notes_dir: profile.notes_dir.as_deref(),
             }),
         )),
         Commands::Push(args) => EffectiveCommand::Push(
@@ -267,6 +269,7 @@ fn build_profile_plan(
                 Some(ProfileContext {
                     config_dir,
                     shared_template: profile.template.as_deref(),
+                    notes_dir: profile.notes_dir.as_deref(),
                 }),
             )
             .map_err(|message| AppError::message(format!("Profile `{profile_name}`: {message}")))?,
@@ -289,6 +292,7 @@ fn build_profile_plan(
 struct ProfileContext<'a> {
     config_dir: &'a Path,
     shared_template: Option<&'a Path>,
+    notes_dir: Option<&'a Path>,
 }
 
 fn resolve_pull_args(
@@ -305,13 +309,11 @@ fn resolve_pull_args(
             .or_else(|| profile.and_then(|profile| profile.team_id.clone())),
         issue_id: args.issue_id.clone(),
         output_dir: args.output_dir.as_deref().map(normalize_path).or_else(|| {
-            profile.and_then(|profile| {
-                profile
-                    .output_dir
-                    .as_deref()
-                    .zip(context)
-                    .map(|(path, context)| resolve_profile_path(path, context.config_dir))
-            })
+            profile
+                .and_then(|profile| profile.notes_dir.as_deref())
+                .or_else(|| context.and_then(|context| context.notes_dir))
+                .zip(context)
+                .map(|(path, context)| resolve_profile_path(path, context.config_dir))
         }),
         template: resolve_template_path(args.template.as_deref(), profile_template, context),
         merge_all_teams: merge_bool(
@@ -354,18 +356,16 @@ fn resolve_push_args(
 ) -> Result<EffectivePushArgs, String> {
     let profile_template = profile.and_then(|profile| profile.template.as_deref());
     let input_dir = args.input_dir.as_deref().map(normalize_path).or_else(|| {
-        profile.and_then(|profile| {
-            profile
-                .input_dir
-                .as_deref()
-                .zip(context)
-                .map(|(path, context)| resolve_profile_path(path, context.config_dir))
-        })
+        profile
+            .and_then(|profile| profile.notes_dir.as_deref())
+            .or_else(|| context.and_then(|context| context.notes_dir))
+            .zip(context)
+            .map(|(path, context)| resolve_profile_path(path, context.config_dir))
     });
 
     let Some(input_dir) = input_dir else {
         return Err(String::from(
-            "`push` requires `input_dir` in the selected profile or `--input-dir` on the command line.",
+            "`push` requires `notes_dir` in the selected profile or `--notes-dir` on the command line.",
         ));
     };
 
@@ -555,7 +555,7 @@ mod tests {
             "--profile",
             "work",
             "pull",
-            "--output-dir",
+            "--notes-dir",
             "./override",
             "--no-confirm",
         ]);
@@ -563,9 +563,9 @@ mod tests {
             r#"
                 [profiles.work]
                 template = "template.md"
+                notes_dir = "notes"
 
                 [profiles.work.pull]
-                output_dir = "notes"
                 confirm = true
             "#,
             "/tmp/config.toml",
@@ -586,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn push_requires_input_dir_after_profile_merge() {
+    fn push_requires_notes_dir_after_profile_merge() {
         let cli = parse_cli(&["linear-sync", "--profile", "work", "push"]);
         let config = load_config_from_str(
             r#"
@@ -600,7 +600,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("requires `input_dir` in the selected profile")
+                .contains("requires `notes_dir` in the selected profile")
         );
     }
 
@@ -609,8 +609,10 @@ mod tests {
         let cli = parse_cli(&["linear-sync", "--profile", "work", "push"]);
         let config = load_config_from_str(
             r#"
+                [profiles.work]
+                notes_dir = "notes"
+
                 [profiles.work.push]
-                input_dir = "notes"
                 force = ["title", "status"]
             "#,
             "/tmp/config.toml",
@@ -629,6 +631,42 @@ mod tests {
             EffectiveCommand::Pull(_) | EffectiveCommand::CacheRebuild(_) => {
                 panic!("expected push plan")
             }
+        }
+    }
+
+    #[test]
+    fn profile_notes_dir_is_shared_by_pull_and_push() {
+        let pull_cli = parse_cli(&["linear-sync", "--profile", "work", "pull"]);
+        let push_cli = parse_cli(&["linear-sync", "--profile", "work", "push"]);
+        let config = load_config_from_str(
+            r#"
+                [profiles.work]
+                notes_dir = "notes/shared"
+
+                [profiles.work.pull]
+                team_id = "ACA"
+
+                [profiles.work.push]
+                force = true
+            "#,
+            "/tmp/config.toml",
+        );
+
+        let pull_plan = build_execution_plans(&pull_cli, Some(&config)).expect("expected pull plan");
+        let push_plan = build_execution_plans(&push_cli, Some(&config)).expect("expected push plan");
+
+        match &pull_plan[0].command {
+            EffectiveCommand::Pull(args) => {
+                assert_eq!(args.output_dir, Some(PathBuf::from("/tmp/notes/shared")));
+            }
+            _ => panic!("expected pull plan"),
+        }
+
+        match &push_plan[0].command {
+            EffectiveCommand::Push(args) => {
+                assert_eq!(args.input_dir, PathBuf::from("/tmp/notes/shared"));
+            }
+            _ => panic!("expected push plan"),
         }
     }
 }

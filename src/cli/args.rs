@@ -60,10 +60,10 @@ pub(crate) struct PullArgs {
     /// Pull only a single issue by identifier, such as ACA-125.
     #[arg(long)]
     pub(crate) issue_id: Option<String>,
-    /// The path to your Obsidian vault directory for issues.
+    /// The path to your notes directory for issues.
     /// Defaults to linear-issues/<team-name>, linear-issues/<each-team-name>,
     /// or linear-issues/all-teams when merging all teams.
-    #[arg(short, long)]
+    #[arg(short = 'd', long = "notes-dir")]
     pub(crate) output_dir: Option<PathBuf>,
     /// Path to a Markdown template file used to structure created notes.
     #[arg(short = 'p', long)]
@@ -144,8 +144,8 @@ impl PullArgs {
 
 #[derive(Args, Clone, Debug, Default)]
 pub(crate) struct PushArgs {
-    /// The path to your Obsidian vault directory
-    #[arg(short, long)]
+    /// The path to your notes directory.
+    #[arg(short = 'd', long = "notes-dir")]
     pub(crate) input_dir: Option<PathBuf>,
     /// Push only a single issue by identifier, such as ACA-125.
     #[arg(long)]

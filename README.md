@@ -73,10 +73,10 @@ Minimal example:
 [profiles.work]
 env_file = "env/work.env"
 template = "templates/work-template.md"
+notes_dir = "notes/linear/work"
 
 [profiles.work.pull]
 team_id = "ACA"
-output_dir = "notes/linear/work"
 merge_all_teams = false
 confirm = false
 force = false
@@ -85,7 +85,6 @@ dry_run = false
 delta = true
 
 [profiles.work.push]
-input_dir = "notes/linear/work"
 force = ["title", "status", "priority"]
 include_done = false
 dry_run = false
@@ -93,13 +92,12 @@ delta = true
 
 [profiles.personal]
 env_file = "env/personal.env"
+notes_dir = "notes/linear/personal"
 
 [profiles.personal.pull]
-output_dir = "notes/linear/personal"
 merge_all_teams = true
 
 [profiles.personal.push]
-input_dir = "notes/linear/personal"
 force = "all"
 ```
 
@@ -109,6 +107,7 @@ Config notes:
 - `env_file` stores the path to an env file, not the API key itself.
 - Relative paths in the config are resolved relative to the config file.
 - Shared profile keys live under `[profiles.<name>]`.
+- `notes_dir` is a shared profile key used by both `pull` and `push`.
 - Command-specific settings live under `[profiles.<name>.pull]` and `[profiles.<name>.push]`.
 - `template` can be defined at the profile level or per-command.
 - Boolean config values use positive names such as `confirm = false` and `delta = true`.
@@ -116,7 +115,7 @@ Config notes:
     - `false` to disable pushing frontmatter changes by default
     - `true` or `"all"` to push all supported properties
     - a list such as `["title", "status"]` to push selected properties
-- `push.input_dir` must be provided either in the selected profile or via `--input-dir`.
+- `notes_dir` should normally be provided in the selected profile so pull and push share the same note root.
 - `issue_id` is CLI-only and is not read from the config file.
 - If a config file exists and you omit `--profile`, LinearSync runs **all configured profiles** for the selected command.
 - `--profile all` explicitly does the same thing.
@@ -146,7 +145,7 @@ You can also run without a profile config.
 
 ```bash
 cargo run -- --env-file ~/.config/linear-sync/work.env pull
-cargo run -- --env-file ~/.config/linear-sync/work.env push --input-dir /path/to/notes
+cargo run -- --env-file ~/.config/linear-sync/work.env push --notes-dir /path/to/notes
 ```
 
 #### Option 2: `.env` file
@@ -208,7 +207,7 @@ After the first successful scan for a team and note root, later pulls query Line
 
 - `-t, --team-id <TEAM_ID>`: Pull issues for a specific team
     - You should use the team identifier used in issue-titles e.g., `ACA` for `ACA-001`
-- `-o, --output-dir <PATH>`: Output directory for generated Markdown files
+- `-d, --notes-dir <PATH>`: Output directory for generated Markdown files
 - `--issue-id <ISSUE-ID>`: Pull only a single issue, such as `ACA-125`
 - `--template <PATH>`: Use a specific Markdown template file for created notes
 - `-m, --merge-all-teams`: Merge issues from all teams into a single directory
@@ -280,7 +279,7 @@ cargo run -- pull --confirm
 Write output to a custom directory:
 
 ```bash
-cargo run -- pull --output-dir /path/to/obsidian/linear
+cargo run -- pull --notes-dir /path/to/obsidian/linear
 ```
 
 Use a specific template file:
@@ -315,7 +314,7 @@ Instead, it prints diffs to stdout and writes a warning block into the local not
 It also consults the local sync cache and warns when a `pull` is needed first.
 
 ```bash
-cargo run -- push --input-dir /path/to/notes
+cargo run -- push --notes-dir /path/to/notes
 ```
 
 Push a single named profile:
@@ -339,18 +338,18 @@ cargo run -- --profile all push
 Push using a workspace-specific env file without profiles:
 
 ```bash
-cargo run -- --env-file ~/.config/linear-sync/work.env push --input-dir /path/to/notes
+cargo run -- --env-file ~/.config/linear-sync/work.env push --notes-dir /path/to/notes
 ```
 
 Push a single issue:
 
 ```bash
-cargo run -- push --input-dir /path/to/notes --issue-id ACA-125
+cargo run -- push --notes-dir /path/to/notes --issue-id ACA-125
 ```
 
 #### Options
 
-- `-i, --input-dir <PATH>`: Root directory containing issue notes
+- `-d, --notes-dir <PATH>`: Root directory containing issue notes
 - `--issue-id <ISSUE-ID>`: Push only a single issue, such as `ACA-125`
 - `-p, --template <PATH>`: Use a specific template when diffing the managed block
 - `--force[=<PROPERTY,...>] | --no-force`: Push supported frontmatter properties to Linear or disable configured push updates
