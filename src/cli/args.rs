@@ -29,6 +29,27 @@ pub(crate) enum Commands {
     Pull(PullArgs),
     /// Pushes local note metadata back to Linear
     Push(PushArgs),
+    /// Cache maintenance commands
+    Cache(CacheArgs),
+}
+
+#[derive(Args, Clone, Debug)]
+pub(crate) struct CacheArgs {
+    #[command(subcommand)]
+    pub(crate) command: CacheCommands,
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub(crate) enum CacheCommands {
+    /// Rebuild the local cache for a note root
+    Rebuild(CacheRebuildArgs),
+}
+
+#[derive(Args, Clone, Debug, Default)]
+pub(crate) struct CacheRebuildArgs {
+    /// The path to the note root whose cache should be rebuilt
+    #[arg(short, long)]
+    pub(crate) input_dir: PathBuf,
 }
 
 #[derive(Args, Clone, Debug, Default)]
@@ -268,7 +289,7 @@ mod tests {
             Commands::Push(args) => {
                 assert_eq!(args.force_override(), Some(ForceSelection::None));
             }
-            Commands::Pull(_) => panic!("expected push command"),
+            Commands::Pull(_) | Commands::Cache(_) => panic!("expected push command"),
         }
     }
 
@@ -282,7 +303,7 @@ mod tests {
                 assert_eq!(args.confirm_override(), Some(false));
                 assert_eq!(args.include_done_override(), None);
             }
-            Commands::Push(_) => panic!("expected pull command"),
+            Commands::Push(_) | Commands::Cache(_) => panic!("expected pull command"),
         }
     }
 }

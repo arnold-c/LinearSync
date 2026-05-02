@@ -15,6 +15,7 @@ mod notes {
     pub(crate) mod sections;
 }
 mod app {
+    pub(crate) mod cache;
     pub(crate) mod pull;
     pub(crate) mod push;
 }
@@ -22,6 +23,7 @@ mod output {
     pub(crate) mod diff;
 }
 
+use crate::app::cache::rebuild_cache_command;
 use crate::app::pull::pull_command;
 use crate::app::push::push_command;
 use crate::cli::Cli;
@@ -125,6 +127,7 @@ fn execute_plan(client: &Client, plan: &ExecutionPlan) -> Result<(), AppError> {
             args.dry_run,
             args.use_delta,
         ),
+        EffectiveCommand::CacheRebuild(args) => rebuild_cache_command(args.input_dir.clone()),
     }
 }
 

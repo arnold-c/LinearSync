@@ -1,4 +1,7 @@
-use crate::cli::{Cli, Commands, ForceSelection, PullArgs, PushArgs, parse_force_selection};
+use crate::cli::{
+    CacheCommands, CacheRebuildArgs, Cli, Commands, ForceSelection, PullArgs, PushArgs,
+    parse_force_selection,
+};
 use crate::error::AppError;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -67,6 +70,7 @@ pub(crate) struct ExecutionPlan {
 pub(crate) enum EffectiveCommand {
     Pull(EffectivePullArgs),
     Push(EffectivePushArgs),
+    CacheRebuild(EffectiveCacheRebuildArgs),
 }
 
 #[derive(Debug)]
@@ -92,6 +96,11 @@ pub(crate) struct EffectivePushArgs {
     pub(crate) include_done: bool,
     pub(crate) dry_run: bool,
     pub(crate) use_delta: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct EffectiveCacheRebuildArgs {
+    pub(crate) input_dir: PathBuf,
 }
 
 pub(crate) fn load_config(config_path: Option<&Path>) -> Result<Option<LoadedConfig>, AppError> {
@@ -209,6 +218,11 @@ fn build_direct_plan(cli: &Cli) -> Result<ExecutionPlan, AppError> {
         Commands::Push(args) => {
             EffectiveCommand::Push(resolve_push_args(args, None, None).map_err(AppError::message)?)
         }
+        Commands::Cache(args) => match &args.command {
+            CacheCommands::Rebuild(rebuild) => {
+                EffectiveCommand::CacheRebuild(resolve_cache_rebuild_args(rebuild))
+            }
+        },
     };
 
     Ok(ExecutionPlan {
@@ -257,6 +271,11 @@ fn build_profile_plan(
             )
             .map_err(|message| AppError::message(format!("Profile `{profile_name}`: {message}")))?,
         ),
+        Commands::Cache(args) => match &args.command {
+            CacheCommands::Rebuild(rebuild) => {
+                EffectiveCommand::CacheRebuild(resolve_cache_rebuild_args(rebuild))
+            }
+        },
     };
 
     Ok(ExecutionPlan {
@@ -371,6 +390,12 @@ fn resolve_push_args(
             true,
         ),
     })
+}
+
+fn resolve_cache_rebuild_args(args: &CacheRebuildArgs) -> EffectiveCacheRebuildArgs {
+    EffectiveCacheRebuildArgs {
+        input_dir: normalize_path(&args.input_dir),
+    }
 }
 
 fn resolve_push_force_selection(
@@ -554,7 +579,9 @@ mod tests {
                 assert!(!args.confirm);
                 assert_eq!(args.template, Some(PathBuf::from("/tmp/template.md")));
             }
-            EffectiveCommand::Push(_) => panic!("expected pull plan"),
+            EffectiveCommand::Push(_) | EffectiveCommand::CacheRebuild(_) => {
+                panic!("expected pull plan")
+            }
         }
     }
 
@@ -599,7 +626,9 @@ mod tests {
                 }
                 _ => panic!("expected selected force properties"),
             },
-            EffectiveCommand::Pull(_) => panic!("expected push plan"),
+            EffectiveCommand::Pull(_) | EffectiveCommand::CacheRebuild(_) => {
+                panic!("expected push plan")
+            }
         }
     }
 }

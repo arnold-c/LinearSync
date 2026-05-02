@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::notes::discovery::discover_markdown_notes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -186,6 +187,24 @@ impl SyncCache {
             .entry(team_id.to_string())
             .or_default()
             .last_remote_scan_at = Some(scanned_at.to_string());
+    }
+
+    pub(crate) fn rebuild_local_state(&mut self, root: &Path) {
+        let note_paths = discover_markdown_notes(root, true);
+        self.rebuild_note_index(root, &note_paths);
+        self.last_local_index_at = Some(Utc::now().to_rfc3339());
+
+        self.issues.retain(|identifier, entry| {
+            indexed_note_path_from_entry(root, identifier, &entry.path, true).is_some()
+        });
+
+        for (identifier, note_entry) in &self.notes {
+            if let Some(issue_entry) = self.issues.get_mut(identifier) {
+                issue_entry.path = note_entry.path.clone();
+                issue_entry.team_slug = note_entry.team_slug.clone();
+                issue_entry.status_slug = note_entry.status_slug.clone();
+            }
+        }
     }
 
     pub(crate) fn update_issue(

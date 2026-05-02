@@ -170,6 +170,7 @@ export LINEAR_API_KEY=lin_api_your_key_here
 ```bash
 cargo run -- [GLOBAL_OPTIONS] pull [OPTIONS]
 cargo run -- [GLOBAL_OPTIONS] push [OPTIONS]
+cargo run -- [GLOBAL_OPTIONS] cache rebuild --input-dir /path/to/notes
 ```
 
 Or with the built binary:
@@ -177,11 +178,20 @@ Or with the built binary:
 ```bash
 ./target/release/LinearSync [GLOBAL_OPTIONS] pull [OPTIONS]
 ./target/release/LinearSync [GLOBAL_OPTIONS] push [OPTIONS]
+./target/release/LinearSync [GLOBAL_OPTIONS] cache rebuild --input-dir /path/to/notes
 ```
 
 ## Commands
 
 ### Global options
+
+### `cache rebuild`
+
+Rebuild the local cache for a note root without running a pull or push.
+This rescans markdown notes, rebuilds the local note index, repairs cached
+issue paths and status metadata from disk, and drops stale issue entries whose
+files no longer exist.
+
 
 - `--config <PATH>`: Load profiles from a specific TOML config file instead of `~/.config/linear-sync/config.toml`
 - `--profile <NAME[,NAME...]>`: Run one or more named profiles from the config file
@@ -543,7 +553,7 @@ This project uses:
 - `push` only updates supported frontmatter-backed Linear fields when forced
 - Managed block changes are never pushed back to Linear
 - Incremental pull uses per-team scan timestamps
-- There are no explicit cache control flags yet such as `--rebuild-cache` or `--no-cache`
+- There is no remote-refresh cache maintenance mode yet; `cache rebuild` is currently local-only
 - Error handling is mostly CLI-oriented and exits on API failures
 - Output format is opinionated toward Markdown note workflows
 
