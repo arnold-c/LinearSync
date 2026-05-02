@@ -11,11 +11,12 @@ This document sketches a caching design for `LinearSync` that supports:
 
 Use a local cache file to store per-note sync baselines.
 
-Status: phase 1 of this plan is now implemented. The current code uses a
-note-root-local cache file, records per-issue baselines, fetches Linear
-`updatedAt`, computes a normalized local push hash, and uses the derived sync
-state for warnings and some skip decisions. Incremental remote fetching is still
-future work.
+Status: phases 1 and 3 of this plan are now implemented, and phase 2 is
+partially implemented. The current code uses a note-root-local cache file,
+records per-issue baselines, records per-team remote scan timestamps, fetches
+Linear `updatedAt`, computes a normalized local push hash, and uses the derived
+sync state for warnings and skip decisions. Targeted cache-backed note lookup is
+implemented, while broader push-side indexing is still future work.
 
 The key idea is to track:
 
@@ -176,6 +177,11 @@ Current implementation structure:
 ```json
 {
   "version": 1,
+  "teams": {
+    "team-id": {
+      "last_remote_scan_at": "2026-04-29T12:00:00Z"
+    }
+  },
   "issues": {
     "ENG-123": {
       "path": "in-progress/ENG-123.md",
@@ -216,7 +222,10 @@ Potential future fields:
 - `last_seen_file_size`
 - `last_conflict_at`
 - `last_warning_kind`
-- per-team remote scan metadata such as `last_remote_scan_at`
+
+Currently implemented per-team field:
+
+- `last_remote_scan_at`
 
 ### Why one cache file per note root?
 
@@ -292,6 +301,8 @@ That gives:
 
 ### Stage 2: incremental remote pull
 
+Status: implemented.
+
 Once the cache is established, switch to querying only remotely changed issues.
 
 Suggested query shape:
@@ -349,6 +360,8 @@ query IssuesUpdatedSince($teamId: String!, $cursor: String, $since: DateTimeOrDu
 - paginate using `pageInfo.endCursor`
 
 ### Overlap window
+
+Implemented with a 5-minute overlap.
 
 Do not query from the exact last scan timestamp only.
 
@@ -577,7 +590,6 @@ Currently used for:
 
 Still intentionally not included:
 
-- incremental remote fetching
 - full push-side short-circuiting before remote fetches
 
 ### Phase 2: local note indexing
@@ -602,16 +614,23 @@ Still useful next:
 
 ### Phase 3: incremental remote pull
 
-Add per-team:
+Status: complete.
+
+Added per-team:
 
 - `last_remote_scan_at`
 
-Then:
+Implemented:
 
 - query Linear with `updatedAt.gte`
 - order by `updatedAt`
 - paginate until complete
-- use overlap window
+- use an overlap window
+
+Current scope notes:
+
+- scan markers are updated after non-dry-run team pulls
+- targeted single-issue pulls do not advance the team scan marker
 
 ### Phase 4: explicit cache controls
 
@@ -688,10 +707,9 @@ The current implementation is a good phase-1 foundation.
 
 ### Useful next
 
-- per-team `last_remote_scan_at`
-- incremental pull via `IssueFilter.updatedAt`
 - stronger cache validation and rebuild controls
 - more aggressive push-side short-circuiting using local baselines
+- broader cache-backed indexing for full-root `push` runs
 
 This already improves safety and pull efficiency, and it sets up a clean path
 to faster remote scans later.

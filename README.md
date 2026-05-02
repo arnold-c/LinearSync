@@ -15,6 +15,7 @@ It is designed for note-taking workflows such as Obsidian, where each issue beco
 - Warn when local notes need `push` or remote issues need `pull`
 - Skip unchanged notes and issues during sync decisions
 - Use the cache as a note index for targeted issue lookups before scanning directories
+- Incrementally pull remotely changed issues after the initial team scan
 - Load workspace-specific settings from a TOML config with named profiles
 - Run one profile, several named profiles, or all configured profiles in one command
 - Read the Linear API key from a profile env file, an explicit env file, a `.env` file, or the shell environment
@@ -191,6 +192,7 @@ Or with the built binary:
 
 Fetches issues from Linear and writes them to Markdown files.
 By default, issues already in `Done` are skipped unless they need to be moved from a non-`done` location.
+After the first successful scan for a team and note root, later pulls query Linear incrementally using cached remote scan timestamps.
 
 #### Options
 
@@ -402,9 +404,11 @@ linear-issues/all-teams/.linear-sync/cache.json
 ```
 
 The cache stores per-issue sync baselines such as the note path, last synced
-Linear `updatedAt`, last synced local push hash, and last sync time. It is used
-for warning decisions and skip logic. It is updated after successful `pull` and
-`push` writes, and it is not written during `--dry-run`.
+Linear `updatedAt`, last synced local push hash, and last sync time. It also
+stores per-team remote scan timestamps used for incremental pull queries. It is
+used for warning decisions, skip logic, targeted lookups, and incremental pull
+filtering. It is updated after successful `pull` and `push` writes, and it is
+not written during `--dry-run`.
 
 ### All teams, separate directories
 
@@ -531,7 +535,7 @@ This project uses:
 
 - `push` only updates supported frontmatter-backed Linear fields when forced
 - Managed block changes are never pushed back to Linear
-- The cache does not yet do incremental remote fetching; it is currently used for baselines, warnings, and skip logic
+- Incremental pull currently uses per-team scan timestamps, but `push` is still note-driven and full-root `push` still scans local notes
 - There are no explicit cache control flags yet such as `--rebuild-cache` or `--no-cache`
 - Error handling is mostly CLI-oriented and exits on API failures
 - Output format is opinionated toward Markdown note workflows

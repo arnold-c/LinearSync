@@ -21,10 +21,18 @@ pub(crate) struct IssueCacheEntry {
     pub(crate) last_synced_local_push_hash: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct TeamCacheEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_remote_scan_at: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SyncCache {
     #[serde(default = "cache_version")]
     pub(crate) version: u32,
+    #[serde(default)]
+    pub(crate) teams: BTreeMap<String, TeamCacheEntry>,
     #[serde(default)]
     pub(crate) issues: BTreeMap<String, IssueCacheEntry>,
 }
@@ -46,6 +54,7 @@ impl Default for SyncCache {
     fn default() -> Self {
         Self {
             version: CACHE_VERSION,
+            teams: BTreeMap::new(),
             issues: BTreeMap::new(),
         }
     }
@@ -112,6 +121,19 @@ impl SyncCache {
         }
 
         Some(path)
+    }
+
+    pub(crate) fn last_remote_scan_at(&self, team_id: &str) -> Option<&str> {
+        self.teams
+            .get(team_id)
+            .and_then(|entry| entry.last_remote_scan_at.as_deref())
+    }
+
+    pub(crate) fn update_last_remote_scan_at(&mut self, team_id: &str, scanned_at: &str) {
+        self.teams
+            .entry(team_id.to_string())
+            .or_default()
+            .last_remote_scan_at = Some(scanned_at.to_string());
     }
 
     pub(crate) fn update_issue(
@@ -306,5 +328,18 @@ mod tests {
         );
 
         assert_eq!(cache.indexed_note_path(dir.path(), "ABC-1", true), None);
+    }
+
+    #[test]
+    fn team_scan_marker_round_trips() {
+        let mut cache = SyncCache::default();
+        assert_eq!(cache.last_remote_scan_at("team-1"), None);
+
+        cache.update_last_remote_scan_at("team-1", "2026-05-01T12:00:00Z");
+
+        assert_eq!(
+            cache.last_remote_scan_at("team-1"),
+            Some("2026-05-01T12:00:00Z")
+        );
     }
 }

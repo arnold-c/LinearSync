@@ -18,11 +18,98 @@ use crate::notes::sections::insert_or_remove_note_location_warning;
 use crate::output::diff::{
     ANSI_RESET, ANSI_YELLOW, format_delta_patch, print_colored_diff, print_delta_output,
 };
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use reqwest::blocking::Client;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+const REMOTE_SCAN_OVERLAP_MINUTES: i64 = 5;
+const FULL_PULL_QUERY: &str = r#"
+query GetTeamIssuesPage($teamId: String!, $cursor: String) {
+  issues(
+    first: 100
+    after: $cursor
+    orderBy: updatedAt
+    filter: { team: { id: { eq: $teamId } } }
+  ) {
+    nodes {
+      id
+      identifier
+      title
+      url
+      description
+      updatedAt
+      state {
+        name
+      }
+      priority
+      labels {
+        nodes {
+          name
+        }
+      }
+      project {
+        name
+      }
+      attachments {
+        nodes {
+          title
+          url
+        }
+      }
+    }
+    pageInfo {
+      endCursor
+      hasNextPage
+    }
+  }
+}
+"#;
+const INCREMENTAL_PULL_QUERY: &str = r#"
+query GetTeamIssuesUpdatedSince($teamId: String!, $cursor: String, $since: DateTimeOrDuration!) {
+  issues(
+    first: 100
+    after: $cursor
+    orderBy: updatedAt
+    filter: {
+      team: { id: { eq: $teamId } }
+      updatedAt: { gte: $since }
+    }
+  ) {
+    nodes {
+      id
+      identifier
+      title
+      url
+      description
+      updatedAt
+      state {
+        name
+      }
+      priority
+      labels {
+        nodes {
+          name
+        }
+      }
+      project {
+        name
+      }
+      attachments {
+        nodes {
+          title
+          url
+        }
+      }
+    }
+    pageInfo {
+      endCursor
+      hasNextPage
+    }
+  }
+}
+"#;
 
 #[derive(Default)]
 pub(crate) struct PullStats {
@@ -66,6 +153,102 @@ fn print_pull_sync_warning(
         yellow = ANSI_YELLOW,
         reset = ANSI_RESET,
     );
+}
+
+fn selected_issue_for_team<'a>(
+    selected_issue: Option<&'a RemoteIssue>,
+    team: &TeamInfo,
+) -> Option<&'a RemoteIssue> {
+    selected_issue.filter(|issue| issue.team.id == team.id)
+}
+
+fn selected_issue_value(issue: &RemoteIssue) -> Value {
+    json!({
+        "id": issue.id,
+        "identifier": issue.identifier,
+        "title": issue.title,
+        "url": issue.url,
+        "description": issue.description,
+        "updatedAt": issue.updated_at,
+        "state": {
+            "name": issue.status,
+        },
+        "priority": issue.priority,
+        "labels": {
+            "nodes": issue.labels.iter().map(|label| json!({ "name": label.name })).collect::<Vec<_>>(),
+        },
+        "project": {
+            "name": issue.project.as_ref().map(|project| project.name.clone()).unwrap_or_default(),
+        },
+        "attachments": {
+            "nodes": issue.attachments.iter().map(|url| json!({ "url": url })).collect::<Vec<_>>(),
+        },
+    })
+}
+
+fn incremental_pull_since(cache: &SyncCache, team: &TeamInfo) -> Option<String> {
+    let last_scan = cache.last_remote_scan_at(&team.id)?;
+    let parsed = chrono::DateTime::parse_from_rfc3339(last_scan).ok()?;
+    Some(
+        parsed
+            .with_timezone(&Utc)
+            .checked_sub_signed(Duration::minutes(REMOTE_SCAN_OVERLAP_MINUTES))?
+            .to_rfc3339(),
+    )
+}
+
+fn fetch_team_pull_issues(
+    client: &Client,
+    api_key: &str,
+    team: &TeamInfo,
+    cache: &SyncCache,
+    selected_issue: Option<&RemoteIssue>,
+) -> Result<(Vec<Value>, bool), AppError> {
+    if let Some(issue) = selected_issue_for_team(selected_issue, team) {
+        return Ok((vec![selected_issue_value(issue)], false));
+    }
+
+    let since = incremental_pull_since(cache, team);
+    let query = if since.is_some() {
+        INCREMENTAL_PULL_QUERY
+    } else {
+        FULL_PULL_QUERY
+    };
+    let mut cursor = None::<String>;
+    let mut issues = Vec::new();
+
+    loop {
+        let variables = match &since {
+            Some(since) => {
+                json!({ "teamId": team.id, "cursor": cursor, "since": since })
+            }
+            None => json!({ "teamId": team.id, "cursor": cursor }),
+        };
+        let response = graphql_request(client, api_key, query, variables)?;
+
+        let nodes = response["data"]["issues"]["nodes"]
+            .as_array()
+            .ok_or_else(|| {
+                AppError::message(format!(
+                    "Could not find issues for team '{}' ({}).",
+                    team.name, team.id
+                ))
+            })?;
+        issues.extend(nodes.iter().cloned());
+
+        let page_info = &response["data"]["issues"]["pageInfo"];
+        let has_next_page = page_info["hasNextPage"].as_bool().unwrap_or(false);
+        if !has_next_page {
+            break;
+        }
+
+        cursor = page_info["endCursor"].as_str().map(ToString::to_string);
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    Ok((issues, true))
 }
 
 pub(crate) fn pull_command(
@@ -194,52 +377,6 @@ pub(crate) fn pull_issues(
     dry_run: bool,
     use_delta: bool,
 ) -> Result<PullStats, AppError> {
-    let query = r#"
-    query GetTeamIssues($teamId: String!) {
-      team(id: $teamId) {
-        issues {
-          nodes {
-            id
-            identifier
-            title
-            url
-            description
-            updatedAt
-            state {
-              name
-            }
-            priority
-            labels {
-              nodes {
-                name
-              }
-            }
-            project {
-                name
-            }
-            attachments {
-              nodes {
-                title
-                url
-              }
-            }
-          }
-        }
-      }
-    }
-    "#;
-
-    let response = graphql_request(client, api_key, query, json!({ "teamId": team.id }))?;
-
-    let issues = response["data"]["team"]["issues"]["nodes"]
-        .as_array()
-        .ok_or_else(|| {
-            AppError::message(format!(
-                "Could not find issues for team '{}' ({}).",
-                team.name, team.id
-            ))
-        })?;
-
     if !dry_run && !output_dir.exists() {
         fs::create_dir_all(output_dir)?;
     }
@@ -248,8 +385,11 @@ pub(crate) fn pull_issues(
     let mut stats = PullStats::default();
     let mut cache = SyncCache::load(output_dir)?;
     let team_slug = slugify_team_name(&team.name);
+    let (issues, update_scan_marker) =
+        fetch_team_pull_issues(client, api_key, team, &cache, selected_issue)?;
+    let remote_scan_completed_at = Utc::now().to_rfc3339();
 
-    for issue in issues {
+    for issue in &issues {
         let identifier = issue["identifier"].as_str().unwrap_or("UNKNOWN");
         if let Some(selected_issue) = selected_issue
             && selected_issue.identifier != identifier
@@ -479,6 +619,9 @@ pub(crate) fn pull_issues(
     }
 
     if !dry_run {
+        if update_scan_marker {
+            cache.update_last_remote_scan_at(&team.id, &remote_scan_completed_at);
+        }
         cache.save(output_dir)?;
     }
 
