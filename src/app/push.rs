@@ -199,6 +199,33 @@ fn cache_warning_note(sync_state: SyncState) -> Option<&'static str> {
     }
 }
 
+fn discover_push_note_paths(
+    input_dir: &Path,
+    issue_id: Option<&str>,
+    include_done: bool,
+    cache: &mut SyncCache,
+) -> (Vec<PathBuf>, bool) {
+    match issue_id {
+        Some(identifier) => (
+            cache
+                .indexed_note_path(input_dir, identifier, include_done)
+                .map(|path| vec![path])
+                .unwrap_or_else(|| {
+                    discover_markdown_notes_for_issue(input_dir, identifier, include_done)
+                }),
+            false,
+        ),
+        None if cache.indexed_note_index_is_fresh(input_dir) => {
+            (cache.indexed_note_paths(input_dir, include_done), true)
+        }
+        None => {
+            let indexed_note_paths = discover_markdown_notes(input_dir, true);
+            cache.rebuild_note_index(input_dir, &indexed_note_paths);
+            (cache.indexed_note_paths(input_dir, include_done), true)
+        }
+    }
+}
+
 pub(crate) fn push_command(
     client: &Client,
     api_key: &str,
@@ -213,15 +240,8 @@ pub(crate) fn push_command(
 ) -> Result<(), AppError> {
     let template = load_template(template_path.as_deref())?;
     let mut cache = SyncCache::load(&input_dir)?;
-    let note_paths = match issue_id.as_deref() {
-        Some(identifier) => cache
-            .indexed_note_path(&input_dir, identifier, include_done)
-            .map(|path| vec![path])
-            .unwrap_or_else(|| {
-                discover_markdown_notes_for_issue(&input_dir, identifier, include_done)
-            }),
-        None => discover_markdown_notes(&input_dir, include_done),
-    };
+    let (note_paths, maintain_full_index) =
+        discover_push_note_paths(&input_dir, issue_id.as_deref(), include_done, &mut cache);
 
     if note_paths.is_empty() {
         match issue_id {
@@ -259,6 +279,9 @@ pub(crate) fn push_command(
     }
 
     if !dry_run {
+        if maintain_full_index {
+            cache.mark_local_indexed_now();
+        }
         cache.save(&input_dir)?;
     }
 
@@ -674,5 +697,73 @@ pub(crate) fn resolve_force_keys(
                 .unwrap_or_else(BTreeSet::new),
         ),
         ForceSelection::Selected(keys) => Some(keys.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::discover_push_note_paths;
+    use crate::cache::SyncCache;
+    use std::fs;
+
+    #[test]
+    fn full_root_push_uses_fresh_cached_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let note_path = dir.path().join("in-progress").join("ABC-1.md");
+        fs::create_dir_all(note_path.parent().unwrap()).unwrap();
+        fs::write(&note_path, "test").unwrap();
+
+        let mut cache = SyncCache::default();
+        cache.rebuild_note_index(dir.path(), std::slice::from_ref(&note_path));
+        cache.last_local_index_at = Some("2999-01-01T00:00:00Z".to_string());
+
+        let (note_paths, maintain_full_index) =
+            discover_push_note_paths(dir.path(), None, false, &mut cache);
+
+        assert_eq!(note_paths, vec![note_path]);
+        assert!(maintain_full_index);
+    }
+
+    #[test]
+    fn full_root_push_rebuilds_stale_index_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let note_path = dir.path().join("in-progress").join("ABC-1.md");
+        fs::create_dir_all(note_path.parent().unwrap()).unwrap();
+        fs::write(&note_path, "test").unwrap();
+
+        let mut cache = SyncCache::default();
+        cache.last_local_index_at = Some("1970-01-01T00:00:00Z".to_string());
+
+        let (note_paths, maintain_full_index) =
+            discover_push_note_paths(dir.path(), None, false, &mut cache);
+
+        assert_eq!(note_paths, vec![note_path.clone()]);
+        assert!(maintain_full_index);
+        assert_eq!(
+            cache.indexed_note_path(dir.path(), "ABC-1", false),
+            Some(note_path)
+        );
+    }
+
+    #[test]
+    fn full_root_push_rebuild_keeps_done_notes_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let active_note = dir.path().join("in-progress").join("ABC-1.md");
+        let done_note = dir.path().join("done").join("ABC-2.md");
+        fs::create_dir_all(active_note.parent().unwrap()).unwrap();
+        fs::create_dir_all(done_note.parent().unwrap()).unwrap();
+        fs::write(&active_note, "test").unwrap();
+        fs::write(&done_note, "test").unwrap();
+
+        let mut cache = SyncCache::default();
+        let (note_paths, maintain_full_index) =
+            discover_push_note_paths(dir.path(), None, false, &mut cache);
+
+        assert_eq!(note_paths, vec![active_note.clone()]);
+        assert!(maintain_full_index);
+        assert_eq!(
+            cache.indexed_note_path(dir.path(), "ABC-2", true),
+            Some(done_note)
+        );
     }
 }

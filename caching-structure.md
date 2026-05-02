@@ -12,11 +12,10 @@ This document sketches a caching design for `LinearSync` that supports:
 Use a local cache file to store per-note sync baselines.
 
 Status: phases 1 and 3 of this plan are now implemented, and phase 2 is
-partially implemented. The current code uses a note-root-local cache file,
-records per-issue baselines, records per-team remote scan timestamps, fetches
-Linear `updatedAt`, computes a normalized local push hash, and uses the derived
-sync state for warnings and skip decisions. Targeted cache-backed note lookup is
-implemented, while broader push-side indexing is still future work.
+mostly implemented. The current code uses a note-root-local cache file,
+records per-issue baselines, stores a local note index, records per-team remote
+scan timestamps, fetches Linear `updatedAt`, computes a normalized local push
+hash, and uses the derived sync state for warnings and skip decisions.
 
 The key idea is to track:
 
@@ -177,9 +176,17 @@ Current implementation structure:
 ```json
 {
   "version": 1,
+  "last_local_index_at": "2026-04-29T12:00:00Z",
   "teams": {
     "team-id": {
       "last_remote_scan_at": "2026-04-29T12:00:00Z"
+    }
+  },
+  "notes": {
+    "ENG-123": {
+      "path": "in-progress/ENG-123.md",
+      "team_slug": "platform",
+      "status_slug": "in-progress"
     }
   },
   "issues": {
@@ -215,6 +222,8 @@ Per issue:
 Currently implemented:
 
 - `linear_id`
+- root-level `last_local_index_at`
+- root-level `notes` note index entries
 
 Potential future fields:
 
@@ -392,16 +401,20 @@ Then deduplicate issue IDs in memory during the run.
    - include them when `--include-done` is set
 3. For each note:
    - parse local note
-   - fetch the remote issue including `updatedAt`
    - compute `current_local_push_hash`
    - load cache entry if present
-4. Compare local and remote values to the cached baselines.
-5. If remote changed only:
-   - warn to run `pull`
-   - do not apply forced updates
-6. If both changed:
-   - warn for manual reconciliation
-   - do not apply forced updates
+4. If there is no cache baseline:
+   - treat the note as unknown state
+   - fetch the remote issue before allowing any push decision
+5. If `current_local_push_hash == last_synced_local_push_hash`:
+   - local pushable metadata has not changed since the last synced baseline
+   - this is the main case where remote work may be skipped in a future optimization
+   - skip pushing unless explicit validation is needed
+6. If `current_local_push_hash != last_synced_local_push_hash`:
+   - always fetch the remote issue including `updatedAt`
+   - compare current remote `updatedAt` against `last_synced_linear_updated_at`
+   - if remote unchanged: normal push candidate
+   - if remote changed too: conflict warning and do not overwrite
 7. Otherwise:
    - continue with the normal diff / optional forced push flow
 8. After a successful push, or after successfully persisting a note with a clean
@@ -409,9 +422,13 @@ Then deduplicate issue IDs in memory during the run.
    - refresh or trust authoritative remote `updatedAt`
    - update cache baselines
 
+Safety rule: any note that is actually going to be pushed must fetch the remote
+issue first. Local hash divergence alone is not enough to prove the remote issue
+is unchanged.
+
 This is intentionally conservative. The current implementation still performs a
-remote fetch per pushed note and does not yet use the cache to fully avoid that
-work.
+remote fetch per pushed note. A future optimization should only short-circuit
+notes whose local pushable metadata is unchanged since the last synced baseline.
 
 ### Push warnings
 
@@ -419,6 +436,13 @@ Currently implemented:
 
 - remote changed since sync but local did not
 - both local and remote changed since sync
+
+Desired safety behavior for future push short-circuiting:
+
+- if the local push hash changed since the last synced baseline, fetch the
+  remote issue before allowing any push
+- never treat a locally changed note as safe to push without checking whether
+  the remote issue changed too
 
 Not yet implemented from this plan:
 
@@ -590,27 +614,31 @@ Currently used for:
 
 Still intentionally not included:
 
-- full push-side short-circuiting before remote fetches
+- push-side short-circuiting that skips remote fetches for unchanged local
+  notes
 
 ### Phase 2: local note indexing
 
-Partially started.
+Mostly complete.
 
-The current cache already stores:
+The current cache stores:
 
 - identifier -> path
 - identifier -> status slug
 - identifier -> team slug
+- root-level `last_local_index_at` freshness metadata
 
 Current use:
 
 - `pull` uses the cached path before scanning other status dirs
 - `push --issue-id <ID>` uses the cached path before falling back to directory scanning
+- full-root `push` uses the cached note index when it is fresh
+- full-root `push` rebuilds the note index from disk when local directories changed
 
 Still useful next:
 
-- reduce directory traversal for full-root `push` runs
-- rely more heavily on the cache as a local note index
+- rely more heavily on the cache as a local note index in more workflows
+- add explicit rebuild / bypass controls for local indexing
 
 ### Phase 3: incremental remote pull
 
@@ -709,7 +737,7 @@ The current implementation is a good phase-1 foundation.
 
 - stronger cache validation and rebuild controls
 - more aggressive push-side short-circuiting using local baselines
-- broader cache-backed indexing for full-root `push` runs
+- explicit cache controls such as rebuild / bypass flags
 
 This already improves safety and pull efficiency, and it sets up a clean path
 to faster remote scans later.
