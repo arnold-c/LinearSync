@@ -362,6 +362,8 @@ cargo run -- push --input-dir /path/to/notes --issue-id ACA-125
 - If a forced status update moves an issue to `Done`, the note is moved to the `done/` subdirectory
 - By default, `pull` skips issues already `Done` when they already live in `done/` or do not yet exist locally
 - Issues transitioning between active statuses and `Done` are always processed so the corresponding note is updated or moved
+- `push` computes a local push hash from pushable frontmatter and skips the remote fetch entirely when that hash matches the cached last-synced baseline
+- When the local push hash changed, `push` fetches the remote issue, computes the frontmatter and managed-block diffs, and writes the same review block into the note that pull-style reconciliation uses
 - `push` warns and skips forced updates when Linear changed since the last successful sync and a `pull` is needed first
 - `pull` warns and skips overwriting notes when local pushable metadata changed since the last successful sync and a `push` is needed first
 - `pull` and `push` both warn when both sides changed since the last successful sync
@@ -408,8 +410,9 @@ The cache stores per-issue sync baselines such as the note path, last synced
 Linear `updatedAt`, last synced local push hash, and last sync time. It also
 stores a local note index for push discovery and per-team remote scan timestamps
 used for incremental pull queries. It is used for warning decisions, skip
-logic, targeted lookups, full-root push discovery, and incremental pull
-filtering. It is updated after successful `pull` and `push` writes, and it is
+logic, targeted lookups, full-root push discovery, incremental pull
+filtering, and push-side short-circuiting when local pushable metadata is
+unchanged. It is updated after successful `pull` and `push` writes, and it is
 not written during `--dry-run`.
 
 ### All teams, separate directories
@@ -537,7 +540,7 @@ This project uses:
 
 - `push` only updates supported frontmatter-backed Linear fields when forced
 - Managed block changes are never pushed back to Linear
-- Incremental pull uses per-team scan timestamps, but `push` still fetches remote issues note-by-note and does not yet short-circuit remote checks from cache state alone
+- Incremental pull uses per-team scan timestamps
 - There are no explicit cache control flags yet such as `--rebuild-cache` or `--no-cache`
 - Error handling is mostly CLI-oriented and exits on API failures
 - Output format is opinionated toward Markdown note workflows

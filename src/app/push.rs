@@ -328,6 +328,16 @@ pub(crate) fn push_note(
         }
     };
 
+    let current_local_push_hash =
+        local_push_hash(&local_note.frontmatter, &local_note.ignored_properties);
+    let cached_entry = cache.get(&local_note.identifier);
+    if cached_entry
+        .map(|entry| entry.last_synced_local_push_hash == current_local_push_hash)
+        .unwrap_or(false)
+    {
+        return stats;
+    }
+
     let remote_issue = match fetch_remote_issue_for_push(client, api_key, &local_note) {
         Ok(issue) => issue,
         Err(failure) => {
@@ -335,10 +345,8 @@ pub(crate) fn push_note(
         }
     };
 
-    let current_local_push_hash =
-        local_push_hash(&local_note.frontmatter, &local_note.ignored_properties);
     let sync_state = compare_sync_state(
-        cache.get(&local_note.identifier),
+        cached_entry,
         &current_local_push_hash,
         &remote_issue.updated_at,
     );
@@ -702,8 +710,9 @@ pub(crate) fn resolve_force_keys(
 
 #[cfg(test)]
 mod tests {
-    use super::discover_push_note_paths;
+        use super::discover_push_note_paths;
     use crate::cache::SyncCache;
+    use crate::notes::frontmatter::local_push_hash_from_content;
     use std::fs;
 
     #[test]
@@ -765,5 +774,37 @@ mod tests {
             cache.indexed_note_path(dir.path(), "ABC-2", true),
             Some(done_note)
         );
+    }
+
+    #[test]
+    fn cached_push_hash_can_short_circuit_remote_fetch_for_unchanged_note() {
+        let content = r#"---
+status: In Progress
+title: Example
+tags:
+  - bug
+---
+
+body
+"#;
+        let hash = local_push_hash_from_content(content).unwrap();
+
+        let mut cache = SyncCache::default();
+        cache.update_issue(
+            std::path::Path::new("/tmp/root"),
+            "ABC-1",
+            std::path::Path::new("/tmp/root/in-progress/ABC-1.md"),
+            "team",
+            "in-progress",
+            Some("linear-id"),
+            "2026-05-01T00:00:00Z",
+            &hash,
+        );
+
+        let unchanged = cache
+            .get("ABC-1")
+            .map(|entry| entry.last_synced_local_push_hash == hash)
+            .unwrap_or(false);
+        assert!(unchanged);
     }
 }

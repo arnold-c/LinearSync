@@ -426,9 +426,15 @@ Safety rule: any note that is actually going to be pushed must fetch the remote
 issue first. Local hash divergence alone is not enough to prove the remote issue
 is unchanged.
 
-This is intentionally conservative. The current implementation still performs a
-remote fetch per pushed note. A future optimization should only short-circuit
-notes whose local pushable metadata is unchanged since the last synced baseline.
+This optimization is now implemented for unchanged local notes.
+
+Current behavior:
+
+- if the current local push hash matches `last_synced_local_push_hash`, `push`
+  skips the remote fetch and does no further work for that note
+- if the local push hash changed since the last synced baseline, `push` fetches
+  the remote issue, computes the frontmatter and managed-block diffs, and writes
+  the push review block back into the note when differences or warnings remain
 
 ### Push warnings
 
@@ -436,6 +442,7 @@ Currently implemented:
 
 - remote changed since sync but local did not
 - both local and remote changed since sync
+- unchanged local notes short-circuit from the cached push hash without a remote fetch
 
 Desired safety behavior for future push short-circuiting:
 
@@ -612,7 +619,7 @@ Currently used for:
 - skipping unchanged pulls
 - cached path lookup before directory scanning
 
-Still intentionally not included:
+Implemented since this phase summary was first written:
 
 - push-side short-circuiting that skips remote fetches for unchanged local
   notes
@@ -736,7 +743,7 @@ The current implementation is a good phase-1 foundation.
 ### Useful next
 
 - stronger cache validation and rebuild controls
-- more aggressive push-side short-circuiting using local baselines
+- stronger cache validation and rebuild controls
 - explicit cache controls such as rebuild / bypass flags
 
 This already improves safety and pull efficiency, and it sets up a clean path
