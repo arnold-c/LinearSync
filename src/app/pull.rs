@@ -348,7 +348,7 @@ pub(crate) fn pull_issues(
             desired_file_path.clone()
         } else {
             cache
-                .cached_note_path(output_dir, identifier)
+                .indexed_note_path(output_dir, identifier, true)
                 .or_else(|| find_issue_note_in_other_status(output_dir, identifier))
                 .unwrap_or_else(|| desired_file_path.clone())
         };

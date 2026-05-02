@@ -212,8 +212,14 @@ pub(crate) fn push_command(
     use_delta: bool,
 ) -> Result<(), AppError> {
     let template = load_template(template_path.as_deref())?;
+    let mut cache = SyncCache::load(&input_dir)?;
     let note_paths = match issue_id.as_deref() {
-        Some(identifier) => discover_markdown_notes_for_issue(&input_dir, identifier, include_done),
+        Some(identifier) => cache
+            .indexed_note_path(&input_dir, identifier, include_done)
+            .map(|path| vec![path])
+            .unwrap_or_else(|| {
+                discover_markdown_notes_for_issue(&input_dir, identifier, include_done)
+            }),
         None => discover_markdown_notes(&input_dir, include_done),
     };
 
@@ -231,7 +237,6 @@ pub(crate) fn push_command(
         return Ok(());
     }
 
-    let mut cache = SyncCache::load(&input_dir)?;
     let mut stats = PushStats::default();
     for note_path in note_paths {
         stats.scanned += 1;

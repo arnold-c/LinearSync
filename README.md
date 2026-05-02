@@ -14,6 +14,7 @@ It is designed for note-taking workflows such as Obsidian, where each issue beco
 - Cache per-note sync baselines in `.linear-sync/cache.json`
 - Warn when local notes need `push` or remote issues need `pull`
 - Skip unchanged notes and issues during sync decisions
+- Use the cache as a note index for targeted issue lookups before scanning directories
 - Load workspace-specific settings from a TOML config with named profiles
 - Run one profile, several named profiles, or all configured profiles in one command
 - Read the Linear API key from a profile env file, an explicit env file, a `.env` file, or the shell environment
@@ -363,6 +364,7 @@ cargo run -- push --input-dir /path/to/notes --issue-id ACA-125
 - `pull` warns and skips overwriting notes when local pushable metadata changed since the last successful sync and a `push` is needed first
 - `pull` and `push` both warn when both sides changed since the last successful sync
 - With `--issue-id`, `pull` and `push` only act on the matching issue while preserving the same location mismatch warnings and move/update guidance
+- For targeted issue lookups, `pull` and `push` consult the cache first and fall back to directory scanning when the cached path is stale or missing
 
 ## Output Structure
 

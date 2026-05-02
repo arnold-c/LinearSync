@@ -593,10 +593,11 @@ The current cache already stores:
 Current use:
 
 - `pull` uses the cached path before scanning other status dirs
+- `push --issue-id <ID>` uses the cached path before falling back to directory scanning
 
 Still useful next:
 
-- reduce directory traversal for `push`
+- reduce directory traversal for full-root `push` runs
 - rely more heavily on the cache as a local note index
 
 ### Phase 3: incremental remote pull

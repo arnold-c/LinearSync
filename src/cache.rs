@@ -94,10 +94,24 @@ impl SyncCache {
         self.issues.get(identifier)
     }
 
-    pub(crate) fn cached_note_path(&self, root: &Path, identifier: &str) -> Option<PathBuf> {
+    pub(crate) fn indexed_note_path(
+        &self,
+        root: &Path,
+        identifier: &str,
+        include_done: bool,
+    ) -> Option<PathBuf> {
         let entry = self.get(identifier)?;
         let path = root.join(&entry.path);
-        path.is_file().then_some(path)
+
+        if !path.is_file() || !path_matches_identifier(&path, identifier) {
+            return None;
+        }
+
+        if !include_done && path_is_in_done_directory(&path) {
+            return None;
+        }
+
+        Some(path)
     }
 
     pub(crate) fn update_issue(
@@ -156,9 +170,37 @@ fn cache_file_path(root: &Path) -> PathBuf {
     root.join(CACHE_DIR_NAME).join(CACHE_FILE_NAME)
 }
 
+fn path_matches_identifier(path: &Path, identifier: &str) -> bool {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::trim)
+        .map(|stem| stem == identifier)
+        .unwrap_or(false)
+}
+
+fn path_is_in_done_directory(path: &Path) -> bool {
+    let mut parent = path.parent();
+
+    while let Some(dir) = parent {
+        if dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.eq_ignore_ascii_case("done"))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        parent = dir.parent();
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SyncCache, SyncState, compare_sync_state};
+    use std::fs;
 
     #[test]
     fn compare_sync_state_covers_all_change_combinations() {
@@ -191,5 +233,78 @@ mod tests {
             compare_sync_state(entry, "sha256:two", "2026-04-30T11:58:12Z"),
             SyncState::BothChanged
         );
+    }
+
+    #[test]
+    fn indexed_note_path_returns_cached_note_when_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let note_path = dir.path().join("in-progress").join("ABC-1.md");
+        fs::create_dir_all(note_path.parent().unwrap()).unwrap();
+        fs::write(&note_path, "test").unwrap();
+
+        let mut cache = SyncCache::default();
+        cache.update_issue(
+            dir.path(),
+            "ABC-1",
+            &note_path,
+            "team",
+            "in-progress",
+            Some("linear-id"),
+            "2026-04-29T11:58:12Z",
+            "sha256:one",
+        );
+
+        assert_eq!(
+            cache.indexed_note_path(dir.path(), "ABC-1", true),
+            Some(note_path)
+        );
+    }
+
+    #[test]
+    fn indexed_note_path_ignores_done_notes_when_excluded() {
+        let dir = tempfile::tempdir().unwrap();
+        let note_path = dir.path().join("done").join("ABC-1.md");
+        fs::create_dir_all(note_path.parent().unwrap()).unwrap();
+        fs::write(&note_path, "test").unwrap();
+
+        let mut cache = SyncCache::default();
+        cache.update_issue(
+            dir.path(),
+            "ABC-1",
+            &note_path,
+            "team",
+            "done",
+            Some("linear-id"),
+            "2026-04-29T11:58:12Z",
+            "sha256:one",
+        );
+
+        assert_eq!(cache.indexed_note_path(dir.path(), "ABC-1", false), None);
+        assert_eq!(
+            cache.indexed_note_path(dir.path(), "ABC-1", true),
+            Some(note_path)
+        );
+    }
+
+    #[test]
+    fn indexed_note_path_rejects_stale_identifier_mismatches() {
+        let dir = tempfile::tempdir().unwrap();
+        let note_path = dir.path().join("in-progress").join("XYZ-9.md");
+        fs::create_dir_all(note_path.parent().unwrap()).unwrap();
+        fs::write(&note_path, "test").unwrap();
+
+        let mut cache = SyncCache::default();
+        cache.update_issue(
+            dir.path(),
+            "ABC-1",
+            &note_path,
+            "team",
+            "in-progress",
+            Some("linear-id"),
+            "2026-04-29T11:58:12Z",
+            "sha256:one",
+        );
+
+        assert_eq!(cache.indexed_note_path(dir.path(), "ABC-1", true), None);
     }
 }
