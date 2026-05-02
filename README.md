@@ -76,7 +76,7 @@ template = "templates/work-template.md"
 notes_dir = "notes/linear/work"
 
 [profiles.work.pull]
-team_id = "ACA"
+team_id = "<linear-team-id>"
 merge_all_teams = false
 confirm = false
 force = false
@@ -206,7 +206,8 @@ After the first successful scan for a team and note root, later pulls query Line
 #### Options
 
 - `-t, --team-id <TEAM_ID>`: Pull issues for a specific team
-    - You should use the team identifier used in issue-titles e.g., `ACA` for `ACA-001`
+    - Use the Linear team `id`, not the issue prefix key
+    - Example: use the team's API `id`, not `ACA` from `ACA-001`
 - `-d, --notes-dir <PATH>`: Output directory for generated Markdown files
 - `--issue-id <ISSUE-ID>`: Pull only a single issue, such as `ACA-125`
 - `--template <PATH>`: Use a specific Markdown template file for created notes
@@ -237,7 +238,7 @@ cargo run -- --config ./config.toml --profile work pull
 Pull issues for a specific team:
 
 ```bash
-cargo run -- pull --team-id <TEAM_ID>
+cargo run -- pull --team-id <linear-team-id>
 ```
 
 Pull a single named profile:
@@ -255,7 +256,7 @@ cargo run -- --profile all pull
 Pull using a workspace-specific env file without profiles:
 
 ```bash
-cargo run -- --env-file ~/.config/linear-sync/work.env pull --team-id <TEAM_ID>
+cargo run -- --env-file ~/.config/linear-sync/work.env pull --team-id <linear-team-id>
 ```
 
 Pull a single issue:

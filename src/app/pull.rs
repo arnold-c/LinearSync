@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 const REMOTE_SCAN_OVERLAP_MINUTES: i64 = 5;
 const FULL_PULL_QUERY: &str = r#"
-query GetTeamIssuesPage($teamId: String!, $cursor: String) {
+query GetTeamIssuesPage($teamId: ID!, $cursor: String) {
   issues(
     first: 100
     after: $cursor
@@ -67,7 +67,7 @@ query GetTeamIssuesPage($teamId: String!, $cursor: String) {
 }
 "#;
 const INCREMENTAL_PULL_QUERY: &str = r#"
-query GetTeamIssuesUpdatedSince($teamId: String!, $cursor: String, $since: DateTimeOrDuration!) {
+query GetTeamIssuesUpdatedSince($teamId: ID!, $cursor: String, $since: DateTimeOrDuration!) {
   issues(
     first: 100
     after: $cursor
