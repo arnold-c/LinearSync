@@ -431,7 +431,11 @@ This optimization is now implemented for unchanged local notes.
 Current behavior:
 
 - if the current local push hash matches `last_synced_local_push_hash`, `push`
-  skips the remote fetch and does no further work for that note
+  skips the remote fetch and does no further work for that note during full-root
+  non-forced runs
+- if `--issue-id` or `--force` is used, `push` still fetches the remote issue
+  even when the local hash is unchanged so it can validate the cached baseline
+  against current Linear state
 - if the local push hash changed since the last synced baseline, `push` fetches
   the remote issue, computes the frontmatter and managed-block diffs, and writes
   the push review block back into the note when differences or warnings remain
@@ -442,7 +446,8 @@ Currently implemented:
 
 - remote changed since sync but local did not
 - both local and remote changed since sync
-- unchanged local notes short-circuit from the cached push hash without a remote fetch
+- unchanged local notes short-circuit from the cached push hash without a remote fetch during full-root non-forced runs
+- targeted and forced pushes always validate the cached baseline against current remote state
 
 Desired safety behavior for future push short-circuiting:
 

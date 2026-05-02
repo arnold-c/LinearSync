@@ -238,6 +238,7 @@ pub(crate) fn push_command(
     dry_run: bool,
     use_delta: bool,
 ) -> Result<(), AppError> {
+    let is_targeted_push = issue_id.is_some();
     let template = load_template(template_path.as_deref())?;
     let mut cache = SyncCache::load(&input_dir)?;
     let (note_paths, maintain_full_index) =
@@ -269,6 +270,7 @@ pub(crate) fn push_command(
             &note_path,
             template.as_deref(),
             &force_selection,
+            is_targeted_push,
             dry_run,
             use_delta,
         );
@@ -309,6 +311,7 @@ pub(crate) fn push_note(
     note_path: &Path,
     template: Option<&str>,
     force_selection: &ForceSelection,
+    is_targeted_push: bool,
     dry_run: bool,
     use_delta: bool,
 ) -> PushStats {
@@ -331,10 +334,11 @@ pub(crate) fn push_note(
     let current_local_push_hash =
         local_push_hash(&local_note.frontmatter, &local_note.ignored_properties);
     let cached_entry = cache.get(&local_note.identifier);
-    if cached_entry
+    let local_hash_unchanged = cached_entry
         .map(|entry| entry.last_synced_local_push_hash == current_local_push_hash)
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+    let force_requested = !matches!(force_selection, ForceSelection::None);
+    if local_hash_unchanged && !is_targeted_push && !force_requested {
         return stats;
     }
 
@@ -349,6 +353,10 @@ pub(crate) fn push_note(
         cached_entry,
         &current_local_push_hash,
         &remote_issue.updated_at,
+    );
+    let remote_differs_from_cached_baseline = matches!(
+        sync_state,
+        SyncState::RemoteChangedOnly | SyncState::BothChanged
     );
 
     let mut note_content = local_note.content.clone();
@@ -375,6 +383,9 @@ pub(crate) fn push_note(
         );
         println!("  {note}");
         notes.push(note.to_string());
+        if !force_requested {
+            push_failed = true;
+        }
     }
 
     if let Some(warning) = &frontmatter_warning {
@@ -412,10 +423,7 @@ pub(crate) fn push_note(
         println!("  Edit the issue in Linear instead of editing the managed block locally.");
     }
 
-    if !matches!(
-        sync_state,
-        SyncState::RemoteChangedOnly | SyncState::BothChanged
-    ) {
+    if force_requested || !remote_differs_from_cached_baseline {
         let force_keys = resolve_force_keys(force_selection, frontmatter_warning.as_ref());
         if let Some(force_keys) = force_keys {
             let update_plan = build_issue_update_input(
@@ -534,10 +542,7 @@ pub(crate) fn push_note(
     if !dry_run
         && persisted_note
         && !push_failed
-        && !matches!(
-            sync_state,
-            SyncState::RemoteChangedOnly | SyncState::BothChanged
-        )
+        && (!remote_differs_from_cached_baseline || force_requested)
         && sync_warning
             .as_ref()
             .and_then(|warning| warning.frontmatter.as_ref())

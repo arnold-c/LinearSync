@@ -362,9 +362,11 @@ cargo run -- push --input-dir /path/to/notes --issue-id ACA-125
 - If a forced status update moves an issue to `Done`, the note is moved to the `done/` subdirectory
 - By default, `pull` skips issues already `Done` when they already live in `done/` or do not yet exist locally
 - Issues transitioning between active statuses and `Done` are always processed so the corresponding note is updated or moved
-- `push` computes a local push hash from pushable frontmatter and skips the remote fetch entirely when that hash matches the cached last-synced baseline
+- `push` computes a local push hash from pushable frontmatter and skips the remote fetch entirely when that hash matches the cached last-synced baseline during full-root non-forced runs
+- With `--issue-id` or `--force`, `push` always fetches the remote issue to validate the cached baseline against Linear
 - When the local push hash changed, `push` fetches the remote issue, computes the frontmatter and managed-block diffs, and writes the same review block into the note that pull-style reconciliation uses
-- `push` warns and skips forced updates when Linear changed since the last successful sync and a `pull` is needed first
+- Without `--force`, `push` warns, writes the review block into the note, and stops when Linear changed since the last successful sync and a `pull` is needed first
+- With `--force`, `push` still warns when Linear changed since the last successful sync, but proceeds with the update
 - `pull` warns and skips overwriting notes when local pushable metadata changed since the last successful sync and a `push` is needed first
 - `pull` and `push` both warn when both sides changed since the last successful sync
 - With `--issue-id`, `pull` and `push` only act on the matching issue while preserving the same location mismatch warnings and move/update guidance
