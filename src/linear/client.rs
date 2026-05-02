@@ -134,6 +134,7 @@ pub(crate) fn fetch_remote_issue_by_issue_v2_identifier(
         title
         url
         description
+        updatedAt
         priority
         state {
           id
@@ -198,6 +199,7 @@ pub(crate) fn fetch_remote_issue_by_team_and_number(
             title
             url
             description
+            updatedAt
             priority
             state {
               id
@@ -267,6 +269,7 @@ pub(crate) fn fetch_remote_issue_by_id(
         title
         url
         description
+        updatedAt
         priority
         state {
           id
@@ -446,6 +449,7 @@ pub(crate) fn parse_remote_issue(issue: Value) -> Result<RemoteIssue, AppError> 
     let title = issue["title"].as_str().unwrap_or("No Title").to_string();
     let url = issue["url"].as_str().unwrap_or("").to_string();
     let description = issue["description"].as_str().unwrap_or("").to_string();
+    let updated_at = issue["updatedAt"].as_str().unwrap_or("").to_string();
     let status = issue["state"]["name"]
         .as_str()
         .unwrap_or("Todo")
@@ -513,6 +517,7 @@ pub(crate) fn parse_remote_issue(issue: Value) -> Result<RemoteIssue, AppError> 
         title,
         url,
         description,
+        updated_at,
         status,
         priority,
         team,

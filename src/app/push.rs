@@ -1,3 +1,4 @@
+use crate::cache::{SyncCache, SyncState, compare_sync_state};
 use crate::cli::ForceSelection;
 use crate::error::AppError;
 use crate::linear::client::{
@@ -8,8 +9,13 @@ use crate::linear::models::{PriorityInfo, RemoteIssue, get_priority_number};
 use crate::notes::discovery::{
     LocalNote, discover_markdown_notes, discover_markdown_notes_for_issue, parse_local_note,
 };
-use crate::notes::frontmatter::{normalize_project_name, yaml_string, yaml_string_list};
-use crate::notes::paths::{final_note_path_after_push, status_slug, write_note_to_path};
+use crate::notes::frontmatter::{
+    local_push_hash, local_push_hash_from_content, normalize_project_name, yaml_string,
+    yaml_string_list,
+};
+use crate::notes::paths::{
+    final_note_path_after_push, slugify_team_name, status_slug, write_note_to_path,
+};
 use crate::notes::reconcile::{
     FrontmatterWarning, insert_or_remove_conflict_section, managed_section_warning,
     push_frontmatter_diff_warning,
@@ -181,6 +187,18 @@ fn refetch_remote_issue_after_update(
     })
 }
 
+fn cache_warning_note(sync_state: SyncState) -> Option<&'static str> {
+    match sync_state {
+        SyncState::RemoteChangedOnly => Some(
+            "Linear changed since the last sync, but the local pushable metadata has not. Run `pull` before pushing.",
+        ),
+        SyncState::BothChanged => Some(
+            "Both the local note and the Linear issue changed since the last sync. Reconcile manually before pushing.",
+        ),
+        SyncState::Unknown | SyncState::InSync | SyncState::LocalChangedOnly => None,
+    }
+}
+
 pub(crate) fn push_command(
     client: &Client,
     api_key: &str,
@@ -213,6 +231,7 @@ pub(crate) fn push_command(
         return Ok(());
     }
 
+    let mut cache = SyncCache::load(&input_dir)?;
     let mut stats = PushStats::default();
     for note_path in note_paths {
         stats.scanned += 1;
@@ -220,6 +239,8 @@ pub(crate) fn push_command(
             client,
             api_key,
             priority_values,
+            &input_dir,
+            &mut cache,
             &note_path,
             template.as_deref(),
             &force_selection,
@@ -230,6 +251,10 @@ pub(crate) fn push_command(
         stats.warnings += note_stats.warnings;
         stats.errors += note_stats.errors;
         stats.moved += note_stats.moved;
+    }
+
+    if !dry_run {
+        cache.save(&input_dir)?;
     }
 
     if dry_run {
@@ -251,6 +276,8 @@ pub(crate) fn push_note(
     client: &Client,
     api_key: &str,
     priority_values: &[PriorityInfo],
+    input_dir: &Path,
+    cache: &mut SyncCache,
     note_path: &Path,
     template: Option<&str>,
     force_selection: &ForceSelection,
@@ -280,8 +307,15 @@ pub(crate) fn push_note(
         }
     };
 
-    let mut note_content = local_note.content.clone();
+    let current_local_push_hash =
+        local_push_hash(&local_note.frontmatter, &local_note.ignored_properties);
+    let sync_state = compare_sync_state(
+        cache.get(&local_note.identifier),
+        &current_local_push_hash,
+        &remote_issue.updated_at,
+    );
 
+    let mut note_content = local_note.content.clone();
     let mut remote_issue = remote_issue;
     let mut final_status_for_path = remote_issue.status.clone();
     let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -293,6 +327,19 @@ pub(crate) fn push_note(
     );
     let mut managed_warning = managed_section_warning(&local_note.content, &remote_note.content);
     let mut notes = Vec::new();
+    let mut push_failed = false;
+
+    if let Some(note) = cache_warning_note(sync_state) {
+        println!(
+            "{yellow}⚠ Sync review required:{reset} {} ({})",
+            local_note.identifier,
+            local_note.path.display(),
+            yellow = ANSI_YELLOW,
+            reset = ANSI_RESET,
+        );
+        println!("  {note}");
+        notes.push(note.to_string());
+    }
 
     if let Some(warning) = &frontmatter_warning {
         println!(
@@ -329,76 +376,87 @@ pub(crate) fn push_note(
         println!("  Edit the issue in Linear instead of editing the managed block locally.");
     }
 
-    let force_keys = resolve_force_keys(force_selection, frontmatter_warning.as_ref());
-    if let Some(force_keys) = force_keys {
-        let update_plan = build_issue_update_input(
-            client,
-            api_key,
-            priority_values,
-            &remote_issue,
-            &local_note,
-            &force_keys,
-        );
+    if !matches!(
+        sync_state,
+        SyncState::RemoteChangedOnly | SyncState::BothChanged
+    ) {
+        let force_keys = resolve_force_keys(force_selection, frontmatter_warning.as_ref());
+        if let Some(force_keys) = force_keys {
+            let update_plan = build_issue_update_input(
+                client,
+                api_key,
+                priority_values,
+                &remote_issue,
+                &local_note,
+                &force_keys,
+            );
 
-        notes.extend(update_plan.notes.clone());
+            notes.extend(update_plan.notes.clone());
 
-        if !update_plan.input.is_empty() {
-            if dry_run {
-                println!(
-                    "{blue}ℹ Planned push:{reset} {} -> {}",
-                    local_note.identifier,
-                    update_plan.updated_keys.join(", "),
-                    blue = ANSI_BLUE,
-                    reset = ANSI_RESET,
-                );
-                stats.updated += 1;
-                if update_plan.will_move_to_done {
-                    stats.moved += 1;
-                }
-            } else {
-                match update_linear_issue(client, api_key, &remote_issue.id, update_plan.input) {
-                    Ok(()) => {
-                        stats.updated += 1;
-                        if update_plan.will_move_to_done {
-                            stats.moved += 1;
-                            final_status_for_path = "done".to_string();
-                            note_content =
-                                insert_or_remove_note_location_warning(&note_content, None);
-                        }
-                        match refetch_remote_issue_after_update(client, api_key, &remote_issue.id) {
-                            Ok(Some(refetched_issue)) => {
-                                remote_issue = refetched_issue;
-                                let refreshed_now =
-                                    Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                                remote_note = render_remote_issue_note(
-                                    &remote_issue,
-                                    template,
-                                    &refreshed_now,
-                                    priority_values,
-                                );
-                                frontmatter_warning = push_frontmatter_diff_warning(
-                                    &local_note.content,
-                                    &remote_note.content,
-                                    &local_note.ignored_properties,
-                                );
-                                managed_warning = managed_section_warning(
-                                    &local_note.content,
-                                    &remote_note.content,
-                                );
-                            }
-                            Ok(None) => {}
-                            Err(error) => notes.push(error.to_string()),
-                        }
+            if !update_plan.input.is_empty() {
+                if dry_run {
+                    println!(
+                        "{blue}ℹ Planned push:{reset} {} -> {}",
+                        local_note.identifier,
+                        update_plan.updated_keys.join(", "),
+                        blue = ANSI_BLUE,
+                        reset = ANSI_RESET,
+                    );
+                    stats.updated += 1;
+                    if update_plan.will_move_to_done {
+                        stats.moved += 1;
                     }
-                    Err(error) => {
-                        notes.push(error.to_string());
-                        println!(
-                            "{red}✗ Push error:{reset} {}\n  {error}",
-                            local_note.path.display(),
-                            red = ANSI_RED,
-                            reset = ANSI_RESET,
-                        );
-                        stats.errors += 1;
+                } else {
+                    match update_linear_issue(client, api_key, &remote_issue.id, update_plan.input)
+                    {
+                        Ok(()) => {
+                            stats.updated += 1;
+                            if update_plan.will_move_to_done {
+                                stats.moved += 1;
+                                final_status_for_path = "done".to_string();
+                                note_content =
+                                    insert_or_remove_note_location_warning(&note_content, None);
+                            }
+                            match refetch_remote_issue_after_update(
+                                client,
+                                api_key,
+                                &remote_issue.id,
+                            ) {
+                                Ok(Some(refetched_issue)) => {
+                                    remote_issue = refetched_issue;
+                                    let refreshed_now =
+                                        Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                                    remote_note = render_remote_issue_note(
+                                        &remote_issue,
+                                        template,
+                                        &refreshed_now,
+                                        priority_values,
+                                    );
+                                    frontmatter_warning = push_frontmatter_diff_warning(
+                                        &local_note.content,
+                                        &remote_note.content,
+                                        &local_note.ignored_properties,
+                                    );
+                                    managed_warning = managed_section_warning(
+                                        &local_note.content,
+                                        &remote_note.content,
+                                    );
+                                }
+                                Ok(None) => {}
+                                Err(error) => notes.push(error.to_string()),
+                            }
+                        }
+                        Err(error) => {
+                            notes.push(error.to_string());
+                            println!(
+                                "{red}✗ Push error:{reset} {}\n  {error}",
+                                local_note.path.display(),
+                                red = ANSI_RED,
+                                reset = ANSI_RESET,
+                            );
+                            stats.errors += 1;
+                            push_failed = true;
+                        }
                     }
                 }
             }
@@ -416,20 +474,56 @@ pub(crate) fn push_note(
             None
         };
 
-    if !dry_run
-        && let Err(error) = persist_pushed_note(
+    let mut persisted_note = dry_run;
+    if !dry_run {
+        match persist_pushed_note(
             &local_note,
             &note_content,
             sync_warning.as_ref(),
             &final_status_for_path,
+        ) {
+            Ok(()) => persisted_note = true,
+            Err(error) => {
+                println!(
+                    "{red}✗ Push error:{reset} {error}",
+                    red = ANSI_RED,
+                    reset = ANSI_RESET,
+                );
+                stats.errors += 1;
+                push_failed = true;
+            }
+        }
+    }
+
+    if !dry_run
+        && persisted_note
+        && !push_failed
+        && !matches!(
+            sync_state,
+            SyncState::RemoteChangedOnly | SyncState::BothChanged
         )
+        && sync_warning
+            .as_ref()
+            .and_then(|warning| warning.frontmatter.as_ref())
+            .is_none()
     {
-        println!(
-            "{red}✗ Push error:{reset} {error}",
-            red = ANSI_RED,
-            reset = ANSI_RESET,
+        let final_note_path = final_note_path_after_push(&local_note.path, &final_status_for_path);
+        let persisted_content = insert_or_remove_conflict_section(
+            &insert_or_remove_push_sync_section(&note_content, sync_warning.as_ref()),
+            None,
         );
-        stats.errors += 1;
+        if let Some(final_local_push_hash) = local_push_hash_from_content(&persisted_content) {
+            cache.update_issue(
+                input_dir,
+                &local_note.identifier,
+                &final_note_path,
+                &slugify_team_name(&remote_issue.team.name),
+                &status_slug(&final_status_for_path),
+                Some(&remote_issue.id),
+                &remote_issue.updated_at,
+                &final_local_push_hash,
+            );
+        }
     }
 
     if sync_warning.is_some() {

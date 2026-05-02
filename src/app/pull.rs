@@ -1,9 +1,15 @@
+use crate::cache::{SyncCache, SyncState, compare_sync_state};
 use crate::cli::{PullSelection, prompt_for_pull_selection, resolve_pull_selection};
 use crate::error::AppError;
 use crate::linear::client::{fetch_required_issue, fetch_teams, graphql_request};
 use crate::linear::models::{PriorityInfo, RemoteIssue, TeamInfo, get_priority_label};
-use crate::notes::discovery::{find_issue_note_in_other_status, include_done_issue};
-use crate::notes::paths::{file_path_for_issue, note_location_warning, slugify_team_name};
+use crate::notes::discovery::{
+    find_issue_note_in_other_status, include_done_issue, parse_local_note,
+};
+use crate::notes::frontmatter::local_push_hash_from_content;
+use crate::notes::paths::{
+    file_path_for_issue, note_location_warning, slugify_team_name, status_slug,
+};
 use crate::notes::reconcile::{MergeResult, merge_with_existing_note};
 use crate::notes::render::{
     TemplateContext, default_markdown_content, load_template, render_template,
@@ -43,6 +49,23 @@ fn persist_pulled_note(note_path: &Path, markdown_content: &str) -> Result<(), A
             error
         ))
     })
+}
+
+fn print_pull_sync_warning(
+    stats: &mut PullStats,
+    identifier: &str,
+    note_path: &Path,
+    message: &str,
+) {
+    stats.warnings += 1;
+    println!(
+        "{yellow}⚠ Pull skipped:{reset} {} ({}) -> {}",
+        identifier,
+        note_path.display(),
+        message,
+        yellow = ANSI_YELLOW,
+        reset = ANSI_RESET,
+    );
 }
 
 pub(crate) fn pull_command(
@@ -181,6 +204,7 @@ pub(crate) fn pull_issues(
             title
             url
             description
+            updatedAt
             state {
               name
             }
@@ -222,6 +246,8 @@ pub(crate) fn pull_issues(
 
     let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let mut stats = PullStats::default();
+    let mut cache = SyncCache::load(output_dir)?;
+    let team_slug = slugify_team_name(&team.name);
 
     for issue in issues {
         let identifier = issue["identifier"].as_str().unwrap_or("UNKNOWN");
@@ -232,6 +258,7 @@ pub(crate) fn pull_issues(
         }
         let title = issue["title"].as_str().unwrap_or("No Title");
         let status = issue["state"]["name"].as_str().unwrap_or("Todo");
+        let updated_at = issue["updatedAt"].as_str().unwrap_or("");
         let priority_num = issue["priority"].as_i64().unwrap_or(0);
         let priority = get_priority_label(priority_values, priority_num);
         let url = issue["url"].as_str().unwrap_or("");
@@ -320,7 +347,9 @@ pub(crate) fn pull_issues(
         let existing_file_path = if desired_file_path.exists() {
             desired_file_path.clone()
         } else {
-            find_issue_note_in_other_status(output_dir, identifier)
+            cache
+                .cached_note_path(output_dir, identifier)
+                .or_else(|| find_issue_note_in_other_status(output_dir, identifier))
                 .unwrap_or_else(|| desired_file_path.clone())
         };
         let location_warning =
@@ -332,6 +361,41 @@ pub(crate) fn pull_issues(
             existing_file_path.as_path(),
         ) {
             continue;
+        }
+
+        if existing_file_path.exists() && !force {
+            if let Ok(local_note) = parse_local_note(&existing_file_path) {
+                let current_local_push_hash = crate::notes::frontmatter::local_push_hash(
+                    &local_note.frontmatter,
+                    &local_note.ignored_properties,
+                );
+                match compare_sync_state(
+                    cache.get(identifier),
+                    &current_local_push_hash,
+                    updated_at,
+                ) {
+                    SyncState::InSync if location_warning.is_none() => continue,
+                    SyncState::LocalChangedOnly => {
+                        print_pull_sync_warning(
+                            &mut stats,
+                            identifier,
+                            &existing_file_path,
+                            "Local pushable metadata changed since the last sync, but Linear has not changed. Run `push` to update Linear before pulling.",
+                        );
+                        continue;
+                    }
+                    SyncState::BothChanged => {
+                        print_pull_sync_warning(
+                            &mut stats,
+                            identifier,
+                            &existing_file_path,
+                            "Both the local note and the Linear issue changed since the last sync. Reconcile manually, then run `push` or `pull --force` as appropriate.",
+                        );
+                        continue;
+                    }
+                    SyncState::Unknown | SyncState::InSync | SyncState::RemoteChangedOnly => {}
+                }
+            }
         }
 
         let merge_result = if force {
@@ -397,7 +461,25 @@ pub(crate) fn pull_issues(
                     print_colored_diff(&warning.diff);
                 }
             }
+            if !dry_run
+                && let Some(local_push_hash) = local_push_hash_from_content(&markdown_content)
+            {
+                cache.update_issue(
+                    output_dir,
+                    identifier,
+                    &existing_file_path,
+                    &team_slug,
+                    &status_slug(status),
+                    Some(issue_id),
+                    updated_at,
+                    &local_push_hash,
+                );
+            }
         }
+    }
+
+    if !dry_run {
+        cache.save(output_dir)?;
     }
 
     Ok(stats)

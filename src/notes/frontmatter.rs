@@ -1,6 +1,26 @@
 use crate::notes::sections::split_frontmatter;
+use serde::Serialize;
 use serde_yaml::Value as YamlValue;
 use std::collections::BTreeSet;
+
+pub(crate) const SYNCED_FRONTMATTER_KEYS: &[&str] = &[
+    "title",
+    "status",
+    "priority",
+    "linear_id",
+    "tags",
+    "github_links",
+    "project",
+];
+
+#[derive(Serialize)]
+struct CanonicalPushFrontmatter {
+    priority: Option<String>,
+    project: Option<String>,
+    status: Option<String>,
+    tags: Vec<String>,
+    title: Option<String>,
+}
 
 pub(crate) fn extract_linear_id_from_frontmatter(
     frontmatter: &serde_yaml::Mapping,
@@ -76,6 +96,114 @@ pub(crate) fn normalize_project_name(value: &str) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn normalized_optional_scalar(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    })
+}
+
+fn has_ignored_property(ignored_properties: &[String], key: &str) -> bool {
+    let normalized_key = normalize_frontmatter_key(key);
+    ignored_properties
+        .iter()
+        .any(|ignored| normalize_frontmatter_key(ignored) == normalized_key)
+}
+
+fn canonical_push_frontmatter(
+    frontmatter: &serde_yaml::Mapping,
+    ignored_properties: &[String],
+) -> CanonicalPushFrontmatter {
+    let title = if has_ignored_property(ignored_properties, "title") {
+        None
+    } else {
+        frontmatter
+            .get(YamlValue::String("title".to_string()))
+            .and_then(yaml_string)
+            .and_then(|value| normalized_optional_scalar(Some(value)))
+    };
+
+    let status = if has_ignored_property(ignored_properties, "status") {
+        None
+    } else {
+        frontmatter
+            .get(YamlValue::String("status".to_string()))
+            .and_then(yaml_string)
+            .and_then(|value| normalized_optional_scalar(Some(value)))
+    };
+
+    let priority = if has_ignored_property(ignored_properties, "priority") {
+        None
+    } else {
+        frontmatter
+            .get(YamlValue::String("priority".to_string()))
+            .and_then(yaml_string)
+            .and_then(|value| normalized_optional_scalar(Some(value)))
+    };
+
+    let project = if has_ignored_property(ignored_properties, "project") {
+        None
+    } else {
+        frontmatter
+            .get(YamlValue::String("project".to_string()))
+            .and_then(yaml_string)
+            .and_then(|value| normalize_project_name(&value))
+    };
+
+    let mut tags = if has_ignored_property(ignored_properties, "tags") {
+        Vec::new()
+    } else {
+        frontmatter
+            .get(YamlValue::String("tags".to_string()))
+            .and_then(yaml_string_list)
+            .unwrap_or_default()
+    };
+    tags.sort();
+    tags.dedup();
+
+    CanonicalPushFrontmatter {
+        priority,
+        project,
+        status,
+        tags,
+        title,
+    }
+}
+
+fn stable_hash(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+
+    hash
+}
+
+pub(crate) fn local_push_hash(
+    frontmatter: &serde_yaml::Mapping,
+    ignored_properties: &[String],
+) -> String {
+    let payload = canonical_push_frontmatter(frontmatter, ignored_properties);
+    let bytes = serde_json::to_vec(&payload).unwrap_or_default();
+    format!("fnv1a64:{:016x}", stable_hash(&bytes))
+}
+
+pub(crate) fn local_push_hash_from_content(content: &str) -> Option<String> {
+    let (frontmatter, _) = split_frontmatter(content)?;
+    let frontmatter = parse_frontmatter_map(frontmatter)?;
+    let ignored_properties = extract_ignored_properties(content);
+
+    Some(local_push_hash(&frontmatter, &ignored_properties))
 }
 
 pub(crate) fn override_frontmatter_value(content: &str, key: &str, value: YamlValue) -> String {
@@ -221,5 +349,64 @@ pub(crate) fn yaml_scalar_for_diff(value: &YamlValue) -> String {
             .unwrap_or_else(|_| "<unrenderable>".to_string())
             .trim()
             .to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{local_push_hash, parse_frontmatter_map};
+
+    #[test]
+    fn local_push_hash_is_stable_for_sorted_tags_and_trimmed_values() {
+        let first = parse_frontmatter_map(concat!(
+            "---\n",
+            "title: \"Title\"\n",
+            "status: \"In Progress\"\n",
+            "priority: \"High\"\n",
+            "project: \"[[Sync Improvements]]\"\n",
+            "tags:\n",
+            "  - bug\n",
+            "  - sync\n",
+            "---\n",
+        ))
+        .unwrap();
+        let second = parse_frontmatter_map(concat!(
+            "---\n",
+            "title: \" Title \"\n",
+            "status: \"In Progress\"\n",
+            "priority: \"High\"\n",
+            "project: \"Sync Improvements\"\n",
+            "tags:\n",
+            "  - sync\n",
+            "  - bug\n",
+            "---\n",
+        ))
+        .unwrap();
+
+        assert_eq!(local_push_hash(&first, &[]), local_push_hash(&second, &[]));
+    }
+
+    #[test]
+    fn local_push_hash_ignores_ignored_push_fields() {
+        let first = parse_frontmatter_map(concat!(
+            "---\n",
+            "title: \"Local\"\n",
+            "project: \"[[One]]\"\n",
+            "---\n",
+        ))
+        .unwrap();
+        let second = parse_frontmatter_map(concat!(
+            "---\n",
+            "title: \"Local\"\n",
+            "project: \"[[Two]]\"\n",
+            "---\n",
+        ))
+        .unwrap();
+
+        assert_eq!(
+            local_push_hash(&first, &["project".to_string()]),
+            local_push_hash(&second, &["project".to_string()])
+        );
+        assert_ne!(local_push_hash(&first, &[]), local_push_hash(&second, &[]));
     }
 }

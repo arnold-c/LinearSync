@@ -11,6 +11,9 @@ It is designed for note-taking workflows such as Obsidian, where each issue beco
 - Optionally merge issues from all teams into one directory
 - Interactive pull confirmation flow for team and output selection
 - Extract GitHub issue and PR links from Linear attachments
+- Cache per-note sync baselines in `.linear-sync/cache.json`
+- Warn when local notes need `push` or remote issues need `pull`
+- Skip unchanged notes and issues during sync decisions
 - Load workspace-specific settings from a TOML config with named profiles
 - Run one profile, several named profiles, or all configured profiles in one command
 - Read the Linear API key from a profile env file, an explicit env file, a `.env` file, or the shell environment
@@ -296,6 +299,7 @@ cargo run -- pull --include-done
 Checks local notes against Linear and reports differences.
 By default it does **not** push frontmatter changes automatically.
 Instead, it prints diffs to stdout and writes a warning block into the local note.
+It also consults the local sync cache and warns when a `pull` is needed first.
 
 ```bash
 cargo run -- push --input-dir /path/to/notes
@@ -355,6 +359,9 @@ cargo run -- push --input-dir /path/to/notes --issue-id ACA-125
 - If a forced status update moves an issue to `Done`, the note is moved to the `done/` subdirectory
 - By default, `pull` skips issues already `Done` when they already live in `done/` or do not yet exist locally
 - Issues transitioning between active statuses and `Done` are always processed so the corresponding note is updated or moved
+- `push` warns and skips forced updates when Linear changed since the last successful sync and a `pull` is needed first
+- `pull` warns and skips overwriting notes when local pushable metadata changed since the last successful sync and a `push` is needed first
+- `pull` and `push` both warn when both sides changed since the last successful sync
 - With `--issue-id`, `pull` and `push` only act on the matching issue while preserving the same location mismatch warnings and move/update guidance
 
 ## Output Structure
@@ -376,6 +383,26 @@ Example:
 ```text
 linear-issues/platform/in-progress/ENG-123.md
 ```
+
+### Sync cache
+
+Each note root also gets a local cache file:
+
+```text
+<note-root>/.linear-sync/cache.json
+```
+
+Examples:
+
+```text
+linear-issues/platform/.linear-sync/cache.json
+linear-issues/all-teams/.linear-sync/cache.json
+```
+
+The cache stores per-issue sync baselines such as the note path, last synced
+Linear `updatedAt`, last synced local push hash, and last sync time. It is used
+for warning decisions and skip logic. It is updated after successful `pull` and
+`push` writes, and it is not written during `--dry-run`.
 
 ### All teams, separate directories
 
@@ -479,6 +506,10 @@ Currently, the `pull` command exports:
 - project name
 - GitHub issue and PR attachment links
 
+Internally, LinearSync also tracks each issue's `updatedAt` value in the local
+sync cache so it can detect remote-only changes and avoid overwriting newer
+remote state.
+
 The current issue filter includes active work with Linear state types:
 
 - `started`
@@ -498,6 +529,8 @@ This project uses:
 
 - `push` only updates supported frontmatter-backed Linear fields when forced
 - Managed block changes are never pushed back to Linear
+- The cache does not yet do incremental remote fetching; it is currently used for baselines, warnings, and skip logic
+- There are no explicit cache control flags yet such as `--rebuild-cache` or `--no-cache`
 - Error handling is mostly CLI-oriented and exits on API failures
 - Output format is opinionated toward Markdown note workflows
 

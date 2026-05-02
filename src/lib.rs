@@ -1,3 +1,4 @@
+mod cache;
 mod cli;
 mod config;
 mod error;
@@ -374,7 +375,9 @@ new body
         );
 
         let merged = merge_frontmatter(existing, imported);
-        assert!(merged.contains("id: \"ACA-122\""));
+        assert!(merged.contains("id: ACA-122"));
+        assert!(merged.contains("title: Imported title"));
+        assert!(merged.contains("status: Todo"));
         assert!(merged.starts_with("---\n"));
     }
 

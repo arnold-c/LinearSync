@@ -35,6 +35,7 @@ pub(crate) struct RemoteIssue {
     pub(crate) title: String,
     pub(crate) url: String,
     pub(crate) description: String,
+    pub(crate) updated_at: String,
     pub(crate) status: String,
     pub(crate) priority: i64,
     pub(crate) team: TeamInfo,

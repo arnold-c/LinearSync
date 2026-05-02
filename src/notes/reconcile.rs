@@ -1,6 +1,6 @@
 use crate::notes::frontmatter::{
-    collect_frontmatter_keys, parse_frontmatter_map, render_modified_yaml_value_diff,
-    render_yaml_value_diff,
+    SYNCED_FRONTMATTER_KEYS, collect_frontmatter_keys, parse_frontmatter_map,
+    render_modified_yaml_value_diff, render_yaml_value_diff,
 };
 use crate::notes::sections::{
     CONFLICT_SECTION_END, CONFLICT_SECTION_START, ManagedSectionWarning, NOTE_LOCATION_SECTION_END,
@@ -56,14 +56,30 @@ pub(crate) fn merge_frontmatter(existing: &str, new_content: &str) -> String {
     let Some((existing_frontmatter, _)) = split_frontmatter(existing) else {
         return new_content.to_string();
     };
-    let Some((_, new_body)) = split_frontmatter(new_content) else {
+    let Some((new_frontmatter, new_body)) = split_frontmatter(new_content) else {
+        return new_content.to_string();
+    };
+    let Some(mut existing_yaml) = parse_frontmatter_map(existing_frontmatter) else {
+        return new_content.to_string();
+    };
+    let Some(new_yaml) = parse_frontmatter_map(new_frontmatter) else {
         return new_content.to_string();
     };
 
-    format!(
-        "{existing_frontmatter}\n{}",
-        new_body.trim_start_matches('\n')
-    )
+    for key in SYNCED_FRONTMATTER_KEYS {
+        let key_value = YamlValue::String((*key).to_string());
+        existing_yaml.remove(&key_value);
+        if let Some(value) = new_yaml.get(&key_value) {
+            existing_yaml.insert(key_value, value.clone());
+        }
+    }
+
+    let yaml = match serde_yaml::to_string(&existing_yaml) {
+        Ok(yaml) => yaml,
+        Err(_) => return new_content.to_string(),
+    };
+
+    format!("---\n{}---\n{}", yaml, new_body.trim_start_matches('\n'))
 }
 
 pub(crate) fn insert_or_remove_conflict_section(
@@ -108,15 +124,7 @@ pub(crate) fn frontmatter_conflict_warning(
     let existing_yaml = parse_frontmatter_map(existing_frontmatter)?;
     let new_yaml = parse_frontmatter_map(new_frontmatter)?;
 
-    let managed_keys = [
-        "title",
-        "status",
-        "linear_id",
-        "tags",
-        "github_links",
-        "project",
-    ];
-    let mut keys = managed_keys
+    let mut keys = SYNCED_FRONTMATTER_KEYS
         .iter()
         .map(|key| key.to_string())
         .collect::<Vec<_>>();
